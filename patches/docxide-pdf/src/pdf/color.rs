@@ -1,0 +1,330 @@
+use pdf_writer::Content;
+
+/// Set fill color from an RGB byte array.
+pub(super) fn fill_rgb(content: &mut Content, [r, g, b]: [u8; 3]) {
+    content.set_fill_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+}
+
+/// Set stroke color from an RGB byte array.
+pub(super) fn stroke_rgb(content: &mut Content, [r, g, b]: [u8; 3]) {
+    content.set_stroke_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+}
+
+/// Stroke one straight line in its own graphics state; `None` keeps the
+/// current stroke color.
+pub(super) fn stroke_segment(
+    content: &mut Content,
+    (x0, y0): (f32, f32),
+    (x1, y1): (f32, f32),
+    width: f32,
+    color: Option<[u8; 3]>,
+) {
+    content.save_state();
+    content.set_line_width(width);
+    if let Some(c) = color {
+        stroke_rgb(content, c);
+    }
+    content.move_to(x0, y0);
+    content.line_to(x1, y1);
+    content.stroke();
+    content.restore_state();
+}
+
+/// Set fill color from an optional RGB byte array, defaulting to black.
+pub(super) fn fill_color_or_black(content: &mut Content, color: Option<[u8; 3]>) {
+    if let Some(c) = color {
+        fill_rgb(content, c);
+    } else {
+        content.set_fill_gray(0.0);
+    }
+}
+
+/// Set stroke color from an optional RGB byte array, defaulting to black.
+pub(super) fn stroke_color_or_black(content: &mut Content, color: Option<[u8; 3]>) {
+    if let Some(c) = color {
+        stroke_rgb(content, c);
+    } else {
+        content.set_stroke_gray(0.0);
+    }
+}
+
+/// Pixels per point for shadow mask rasterization. Blur is low-frequency,
+/// so half-resolution is sufficient; PDF `interpolate(true)` smooths the rest.
+pub(super) const SHADOW_SCALE: f32 = 0.5;
+
+/// Generate a grayscale blur mask for a drop shadow.
+/// Returns `(pixel_data, pixel_width, pixel_height)`.
+/// The interior rectangle is opaque at `alpha`; the exterior fades via
+/// 3-pass box blur (approximates Gaussian).
+pub(super) fn generate_shadow_mask(
+    width_pt: f32,
+    height_pt: f32,
+    blur_radius: f32,
+    alpha: f32,
+) -> (Vec<u8>, u32, u32) {
+    let total_w = width_pt + 2.0 * blur_radius;
+    let total_h = height_pt + 2.0 * blur_radius;
+    let px_w = (total_w * SHADOW_SCALE).ceil().max(1.0) as u32;
+    let px_h = (total_h * SHADOW_SCALE).ceil().max(1.0) as u32;
+
+    let mut buf = vec![0u8; (px_w * px_h) as usize];
+
+    // Fill interior rectangle (the shadow body before blur)
+    let pad_x = (blur_radius * SHADOW_SCALE).round() as u32;
+    let pad_y = (blur_radius * SHADOW_SCALE).round() as u32;
+    let inner_val = (alpha * 255.0).round().min(255.0) as u8;
+    let inner_w = px_w.saturating_sub(2 * pad_x);
+    let inner_h = px_h.saturating_sub(2 * pad_y);
+    for row in 0..inner_h {
+        let y = pad_y + row;
+        if y >= px_h {
+            break;
+        }
+        for col in 0..inner_w {
+            let x = pad_x + col;
+            if x >= px_w {
+                break;
+            }
+            buf[(y * px_w + x) as usize] = inner_val;
+        }
+    }
+
+    // 3-pass box blur approximates Gaussian blur
+    let box_r = ((blur_radius * SHADOW_SCALE) / 3.0).ceil().max(0.0) as usize;
+    box_blur_3pass(&mut buf, px_w, px_h, box_r);
+
+    (buf, px_w, px_h)
+}
+
+/// In-place 3-pass box blur of a grayscale `buf` (approximates a Gaussian).
+/// No-op when `box_r` is 0.
+fn box_blur_3pass(buf: &mut [u8], px_w: u32, px_h: u32, box_r: usize) {
+    if box_r == 0 {
+        return;
+    }
+    let w = px_w as usize;
+    let h = px_h as usize;
+    let mut tmp = vec![0u8; w * h];
+    for _pass in 0..3 {
+        // Horizontal pass: buf -> tmp
+        for y in 0..h {
+            let mut acc: u32 = 0;
+            for x in 0..=box_r.min(w - 1) {
+                acc += buf[y * w + x] as u32;
+            }
+            for x in 0..w {
+                let right = x + box_r;
+                if right < w && x > 0 {
+                    acc += buf[y * w + right] as u32;
+                }
+                let left_edge = x.saturating_sub(box_r);
+                let right_edge = right.min(w - 1);
+                let count = (right_edge - left_edge + 1) as u32;
+                tmp[y * w + x] = (acc / count).min(255) as u8;
+                if x >= box_r {
+                    acc -= buf[y * w + (x - box_r)] as u32;
+                }
+            }
+        }
+        // Vertical pass: tmp -> buf
+        for x in 0..w {
+            let mut acc: u32 = 0;
+            for y in 0..=box_r.min(h - 1) {
+                acc += tmp[y * w + x] as u32;
+            }
+            for y in 0..h {
+                let bottom = y + box_r;
+                if bottom < h && y > 0 {
+                    acc += tmp[bottom * w + x] as u32;
+                }
+                let top_edge = y.saturating_sub(box_r);
+                let bottom_edge = bottom.min(h - 1);
+                let count = (bottom_edge - top_edge + 1) as u32;
+                buf[y * w + x] = (acc / count).min(255) as u8;
+                if y >= box_r {
+                    acc -= tmp[(y - box_r) * w + x] as u32;
+                }
+            }
+        }
+    }
+}
+
+/// Draw an image drop shadow by referencing a pre-embedded shadow XObject.
+///
+/// When `shadow_xobj_name` is provided, draws the rasterized blur-mask shadow
+/// image at the correct offset position. When `None`, falls back to a single
+/// pre-blended rectangle (for zero-blur or when embedding was skipped).
+pub(super) fn draw_image_shadow(
+    content: &mut Content,
+    shadow: &crate::model::ImageShadow,
+    x: f32,
+    y_bottom: f32,
+    width: f32,
+    height: f32,
+    shadow_xobj_name: Option<&str>,
+) {
+    use pdf_writer::Name;
+
+    if let Some(name) = shadow_xobj_name {
+        let blur = shadow.blur_radius;
+        // Shadow image covers (width + 2*blur) x (height + 2*blur), centered
+        // on the shadow offset position
+        let sx = x + shadow.offset_x - blur;
+        // PDF y-up: offset_y is in screen coords (positive = down)
+        let sy = y_bottom - shadow.offset_y - blur;
+        let sw = width + 2.0 * blur;
+        let sh = height + 2.0 * blur;
+
+        content.save_state();
+        content.transform([sw, 0.0, 0.0, sh, sx, sy]);
+        content.x_object(Name(name.as_bytes()));
+        content.restore_state();
+        return;
+    }
+
+    // Fallback: single pre-blended rectangle (no blur mask available)
+    let sx = x + shadow.offset_x;
+    let sy = y_bottom - shadow.offset_y;
+    let a = shadow.alpha;
+    let blended = [
+        (a * shadow.color[0] as f32 + (1.0 - a) * 255.0) as u8,
+        (a * shadow.color[1] as f32 + (1.0 - a) * 255.0) as u8,
+        (a * shadow.color[2] as f32 + (1.0 - a) * 255.0) as u8,
+    ];
+    content.save_state();
+    fill_color_or_black(content, Some(blended));
+    content.rect(sx, sy, width, height);
+    content.fill_nonzero();
+    content.restore_state();
+}
+
+/// Generate a soft-edge mask: fully opaque interior, fading to transparent
+/// at the edges over `radius_px` pixels. Analytical distance-to-edge formula.
+pub(super) fn generate_soft_edge_mask(w: u32, h: u32, radius_px: f32) -> Vec<u8> {
+    let mut mask = vec![0u8; (w * h) as usize];
+    if radius_px <= 0.0 {
+        mask.fill(255);
+        return mask;
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let dx = (x as f32).min((w - 1 - x) as f32);
+            let dy = (y as f32).min((h - 1 - y) as f32);
+            let d = dx.min(dy);
+            let v = (d / radius_px).min(1.0);
+            mask[(y * w + x) as usize] = (v * 255.0).round() as u8;
+        }
+    }
+    mask
+}
+
+/// Generate an inner shadow mask: opaque border that fades inward via blur.
+/// The mask covers the image area (no padding). The border region is opaque
+/// at `alpha`, the interior is transparent, and blur bleeds inward.
+pub(super) fn generate_inner_shadow_mask(
+    width_pt: f32,
+    height_pt: f32,
+    blur_radius: f32,
+    alpha: f32,
+) -> (Vec<u8>, u32, u32) {
+    let px_w = (width_pt * SHADOW_SCALE).ceil().max(1.0) as u32;
+    let px_h = (height_pt * SHADOW_SCALE).ceil().max(1.0) as u32;
+
+    let mut buf = vec![0u8; (px_w * px_h) as usize];
+    let inner_val = (alpha * 255.0).round().min(255.0) as u8;
+    let border_px = (blur_radius * SHADOW_SCALE).round().max(1.0) as u32;
+
+    // Fill entire buffer with alpha (opaque border)
+    buf.fill(inner_val);
+
+    // Clear interior (everything inside the border becomes transparent)
+    for y in border_px..px_h.saturating_sub(border_px) {
+        for x in border_px..px_w.saturating_sub(border_px) {
+            buf[(y * px_w + x) as usize] = 0;
+        }
+    }
+
+    // 3-pass box blur to soften the edge inward
+    let box_r = ((blur_radius * SHADOW_SCALE) / 3.0).ceil().max(0.0) as usize;
+    box_blur_3pass(&mut buf, px_w, px_h, box_r);
+
+    (buf, px_w, px_h)
+}
+
+/// Draw an inner shadow effect on top of an image. Drawn AFTER the image.
+/// Clipped to the image rectangle so the shadow doesn't bleed outside.
+pub(super) fn draw_inner_shadow(
+    content: &mut Content,
+    inner: &crate::model::InnerShadow,
+    x: f32,
+    y_bottom: f32,
+    width: f32,
+    height: f32,
+    xobj_name: Option<&str>,
+) {
+    use pdf_writer::Name;
+
+    if let Some(name) = xobj_name {
+        content.save_state();
+        // Clip to image rectangle
+        content.rect(x, y_bottom, width, height);
+        content.clip_nonzero();
+        content.end_path();
+        // Draw the inner shadow mask offset by shadow direction
+        let sx = x + inner.offset_x;
+        let sy = y_bottom - inner.offset_y;
+        content.transform([width, 0.0, 0.0, height, sx, sy]);
+        content.x_object(Name(name.as_bytes()));
+        content.restore_state();
+    }
+}
+
+/// Draw a reflection below an image. Drawn AFTER the image.
+/// The reflection XObject is the same image with a gradient SMask (fading alpha).
+pub(super) fn draw_reflection(
+    content: &mut Content,
+    reflection: &crate::model::ImageReflection,
+    x: f32,
+    y_bottom: f32,
+    width: f32,
+    height: f32,
+    reflection_xobj_name: Option<&str>,
+) {
+    use pdf_writer::Name;
+
+    if let Some(name) = reflection_xobj_name {
+        content.save_state();
+        let refl_y = y_bottom - reflection.distance;
+        // Render full flipped image — the SMask gradient handles the fade-out
+        content.transform([width, 0.0, 0.0, -height, x, refl_y]);
+        content.x_object(Name(name.as_bytes()));
+        content.restore_state();
+    }
+}
+
+/// Draw a glow effect around an image. Drawn BEFORE the image.
+/// Glow is like a shadow but centered (no offset) with a custom color.
+pub(super) fn draw_image_glow(
+    content: &mut Content,
+    glow: &crate::model::ImageGlow,
+    x: f32,
+    y_bottom: f32,
+    width: f32,
+    height: f32,
+    glow_xobj_name: Option<&str>,
+) {
+    use pdf_writer::Name;
+
+    if let Some(name) = glow_xobj_name {
+        let r = glow.radius;
+        let gx = x - r;
+        let gy = y_bottom - r;
+        let gw = width + 2.0 * r;
+        let gh = height + 2.0 * r;
+
+        content.save_state();
+        content.transform([gw, 0.0, 0.0, gh, gx, gy]);
+        content.x_object(Name(name.as_bytes()));
+        content.restore_state();
+    }
+}

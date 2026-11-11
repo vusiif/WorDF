@@ -1,0 +1,7 @@
+# Build output
+target/
+
+# Container runtime cache & temporary files
+.sandbox-test/cargo-home/
+.sandbox-test/tmp/
+.sandbox-test/target/

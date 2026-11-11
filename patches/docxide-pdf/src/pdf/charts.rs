@@ -1,0 +1,1367 @@
+use std::collections::{HashMap, HashSet};
+
+use pdf_writer::{Content, Name, Str};
+
+use crate::fonts::{FontEntry, to_winansi_bytes};
+use crate::model::{BarGrouping, Chart, ChartType, InlineChart, LegendPosition, MarkerSymbol};
+
+use super::chart_legend::{LegendItem, LegendPlacement, SwatchStyle, render_chart_legend};
+use super::charts_radial;
+use super::color::{fill_rgb, stroke_rgb};
+use super::helpers::draw_circle;
+
+fn ceil_nice(val: f32) -> f32 {
+    if val <= 0.0 {
+        return 1.0;
+    }
+    let mag = 10.0f32.powf(val.log10().floor());
+    let norm = val / mag;
+    let nice = if norm <= 1.5 {
+        1.0
+    } else if norm <= 3.0 {
+        2.0
+    } else if norm <= 7.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice * mag
+}
+
+fn nice_tick_step(max_val: f32, target_ticks: usize) -> f32 {
+    let raw_step = max_val / target_ticks as f32;
+    ceil_nice(raw_step)
+}
+
+fn text_width_approx(text: &str, font_size: f32) -> f32 {
+    text.len() as f32 * font_size * 0.5
+}
+
+pub(super) fn text_width(text: &str, font_size: f32, font: Option<&FontEntry>) -> f32 {
+    match font {
+        Some(f) => f.word_width(text, font_size, false),
+        None => text_width_approx(text, font_size),
+    }
+}
+
+fn format_tick_label(val: f32, step: f32, format_code: Option<&str>) -> String {
+    match format_code {
+        Some(fmt) => apply_number_format(val, fmt),
+        None => {
+            if step.fract() == 0.0 {
+                format!("{}", val as i64)
+            } else {
+                format!("{:.1}", val)
+            }
+        }
+    }
+}
+
+fn apply_number_format(val: f32, fmt: &str) -> String {
+    let has_comma = fmt.contains(',');
+    let has_percent = fmt.contains('%');
+    let effective_val = if has_percent { val * 100.0 } else { val };
+
+    let decimals = if let Some(dot_pos) = fmt.rfind('.') {
+        fmt[dot_pos + 1..]
+            .chars()
+            .take_while(|&c| c == '0' || c == '#')
+            .count()
+    } else {
+        0
+    };
+
+    let formatted = format!("{:.prec$}", effective_val as f64, prec = decimals);
+
+    let result = if has_comma {
+        insert_thousands_separator(&formatted)
+    } else {
+        formatted
+    };
+
+    if has_percent {
+        format!("{}%", result)
+    } else {
+        result
+    }
+}
+
+fn insert_thousands_separator(s: &str) -> String {
+    let (int_part, dec_part) = match s.find('.') {
+        Some(pos) => (&s[..pos], Some(&s[pos..])),
+        None => (s, None),
+    };
+    let negative = int_part.starts_with('-');
+    let digits = if negative { &int_part[1..] } else { int_part };
+    let mut result = String::new();
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    let mut out: String = result.chars().rev().collect();
+    if negative {
+        out.insert(0, '-');
+    }
+    if let Some(d) = dec_part {
+        out.push_str(d);
+    }
+    out
+}
+
+fn wrap_label(text: &str, max_width: f32, font_size: f32, font: Option<&FontEntry>) -> Vec<String> {
+    let full_w = text_width(text, font_size, font);
+    if full_w <= max_width || !text.contains(' ') {
+        return vec![text.to_string()];
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_line = String::new();
+    for word in &words {
+        let test = if current_line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{} {}", current_line, word)
+        };
+        if text_width(&test, font_size, font) > max_width && !current_line.is_empty() {
+            lines.push(current_line);
+            current_line = word.to_string();
+        } else {
+            current_line = test;
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+    lines
+}
+
+fn set_color(content: &mut Content, color: Option<[u8; 3]>) {
+    if let Some(c) = color {
+        fill_rgb(content, c);
+    }
+}
+
+fn set_stroke_color(content: &mut Content, color: Option<[u8; 3]>) {
+    if let Some(c) = color {
+        stroke_rgb(content, c);
+    }
+}
+
+static DEFAULT_AXIS_COLOR: [u8; 3] = [179, 179, 179];
+
+const DEFAULT_MARKER_CYCLE: [MarkerSymbol; 3] = [
+    MarkerSymbol::Diamond,
+    MarkerSymbol::Square,
+    MarkerSymbol::Triangle,
+];
+
+fn resolve_marker(marker: Option<MarkerSymbol>, series_index: usize) -> MarkerSymbol {
+    marker.unwrap_or(DEFAULT_MARKER_CYCLE[series_index % DEFAULT_MARKER_CYCLE.len()])
+}
+
+pub(super) fn draw_marker(content: &mut Content, symbol: MarkerSymbol, x: f32, y: f32, r: f32) {
+    match symbol {
+        MarkerSymbol::None => {}
+        MarkerSymbol::Circle | MarkerSymbol::Dot => {
+            draw_circle(content, x, y, r);
+            content.fill_nonzero();
+        }
+        MarkerSymbol::Square => {
+            content.rect(x - r * 0.8, y - r * 0.8, r * 1.6, r * 1.6);
+            content.fill_nonzero();
+        }
+        MarkerSymbol::Diamond => {
+            content.move_to(x, y + r);
+            content.line_to(x + r, y);
+            content.line_to(x, y - r);
+            content.line_to(x - r, y);
+            content.close_path();
+            content.fill_nonzero();
+        }
+        MarkerSymbol::Triangle => {
+            content.move_to(x, y + r);
+            content.line_to(x + r, y - r * 0.7);
+            content.line_to(x - r, y - r * 0.7);
+            content.close_path();
+            content.fill_nonzero();
+        }
+        MarkerSymbol::Plus => {
+            let t = r * 0.25;
+            content.rect(x - r, y - t, r * 2.0, t * 2.0);
+            content.fill_nonzero();
+            content.rect(x - t, y - r, t * 2.0, r * 2.0);
+            content.fill_nonzero();
+        }
+        MarkerSymbol::X => {
+            let d = r * 0.7;
+            let t = r * 0.25;
+            // Two rotated rectangles approximated as thin diamonds
+            content.move_to(x, y + d + t);
+            content.line_to(x + t, y + d);
+            content.line_to(x + d + t, y);
+            content.line_to(x + d, y - t);
+            content.line_to(x, y - d - t);
+            content.line_to(x - t, y - d);
+            content.line_to(x - d - t, y);
+            content.line_to(x - d, y + t);
+            content.close_path();
+            content.fill_nonzero();
+        }
+        MarkerSymbol::Star => {
+            // 5-point star
+            for i in 0..5 {
+                let angle_outer =
+                    std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI * 2.0 / 5.0;
+                let angle_inner = angle_outer + std::f32::consts::PI / 5.0;
+                let ox = x + r * angle_outer.cos();
+                let oy = y + r * angle_outer.sin();
+                let ix = x + r * 0.4 * angle_inner.cos();
+                let iy = y + r * 0.4 * angle_inner.sin();
+                if i == 0 {
+                    content.move_to(ox, oy);
+                } else {
+                    content.line_to(ox, oy);
+                }
+                content.line_to(ix, iy);
+            }
+            content.close_path();
+            content.fill_nonzero();
+        }
+        MarkerSymbol::Dash => {
+            content.rect(x - r, y - r * 0.2, r * 2.0, r * 0.4);
+            content.fill_nonzero();
+        }
+    }
+}
+
+// Pie chart colors when series data points don't have individual colors
+pub(super) const DEFAULT_PIE_COLORS: &[[u8; 3]] = &[
+    [68, 114, 196],
+    [237, 125, 49],
+    [165, 165, 165],
+    [255, 192, 0],
+    [91, 155, 213],
+    [112, 173, 71],
+    [38, 68, 120],
+    [158, 72, 14],
+];
+
+pub(super) fn resolve_accent_colors(accent_colors: &[[u8; 3]]) -> &[[u8; 3]] {
+    if accent_colors.is_empty() {
+        DEFAULT_PIE_COLORS
+    } else {
+        accent_colors
+    }
+}
+
+pub(super) fn show_text(
+    content: &mut Content,
+    font_key: &str,
+    font_size: f32,
+    x: f32,
+    y: f32,
+    text: &str,
+    font_entry: Option<&FontEntry>,
+) {
+    let bytes = match font_entry {
+        Some(e) => e.encode(text),
+        None => to_winansi_bytes(text),
+    };
+    content
+        .begin_text()
+        .set_font(Name(font_key.as_bytes()), font_size)
+        .next_line(x, y)
+        .show(Str(&bytes))
+        .end_text();
+}
+
+fn compute_axis_range(max_val: f32, target_ticks: usize, headroom_threshold: f32) -> (f32, f32) {
+    let ts = nice_tick_step(max_val, target_ticks);
+    let mut am = (max_val / ts).ceil() * ts;
+    if max_val >= am * headroom_threshold {
+        am += ts;
+    }
+    (ts, am)
+}
+
+struct PlotRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+/// Render a chart's data series (bars/line/area/scatter/bubble) into the plot
+/// rectangle. Pie/doughnut/radar use dedicated renderers and never reach here.
+/// Split out of render_chart, which keeps axis/gridline/legend orchestration.
+fn draw_chart_series(
+    c: &Chart,
+    content: &mut Content,
+    rect: PlotRect,
+    num_categories: usize,
+    axis_max: f32,
+    x_axis_max: f32,
+    alpha_states: &mut HashSet<u8>,
+) {
+    let PlotRect {
+        x: plot_x,
+        y: plot_y,
+        w: plot_w,
+        h: plot_h,
+    } = rect;
+    match c.chart_type {
+        ChartType::Bar {
+            horizontal,
+            grouping,
+        } => {
+            // Categories run along one side of the plot, values along the other.
+            let (cat_origin, cat_extent, val_origin, val_extent) = if horizontal {
+                (plot_y, plot_h, plot_x, plot_w)
+            } else {
+                (plot_x, plot_w, plot_y, plot_h)
+            };
+            let bar = |content: &mut Content, cat_pos: f32, val_pos: f32, thick: f32, len: f32| {
+                if horizontal {
+                    content.rect(val_pos, cat_pos, len, thick);
+                } else {
+                    content.rect(cat_pos, val_pos, thick, len);
+                }
+                content.fill_nonzero();
+            };
+            let stacked = grouping != BarGrouping::Clustered;
+            let is_percent_stacked = grouping == BarGrouping::PercentStacked;
+            let gap_ratio = c.gap_width_pct / 100.0;
+            let group = cat_extent / num_categories as f32;
+            let slots = if stacked { 1.0 } else { c.series.len() as f32 };
+            let thick = group / (slots + gap_ratio);
+            let gap = gap_ratio * thick;
+
+            for ci in 0..num_categories {
+                let group_pos = cat_origin + ci as f32 * group + gap / 2.0;
+                if stacked {
+                    let cat_total = if is_percent_stacked {
+                        c.series
+                            .iter()
+                            .map(|s| s.values.get(ci).copied().unwrap_or(0.0))
+                            .sum::<f32>()
+                    } else {
+                        0.0
+                    };
+                    let mut cumulative = 0.0;
+                    for series in c.series.iter() {
+                        let raw = series.values.get(ci).copied().unwrap_or(0.0);
+                        let val = if is_percent_stacked && cat_total > 0.0 {
+                            (raw / cat_total) * 100.0
+                        } else {
+                            raw
+                        };
+                        let len = (val / axis_max) * val_extent;
+                        set_color(content, series.color);
+                        bar(content, group_pos, val_origin + cumulative, thick, len);
+                        cumulative += len;
+                    }
+                } else {
+                    for (si, series) in c.series.iter().enumerate() {
+                        let val = series.values.get(ci).copied().unwrap_or(0.0);
+                        let len = (val / axis_max) * val_extent;
+                        set_color(content, series.color);
+                        bar(
+                            content,
+                            group_pos + si as f32 * thick,
+                            val_origin,
+                            thick,
+                            len,
+                        );
+                    }
+                }
+            }
+        }
+        ChartType::Line => {
+            content.set_line_width(2.0);
+            let group_w = plot_w / num_categories as f32;
+            for (si, series) in c.series.iter().enumerate() {
+                set_stroke_color(content, series.color);
+                let pts: Vec<(f32, f32)> = series
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(|(ci, &val)| {
+                        (
+                            plot_x + (ci as f32 + 0.5) * group_w,
+                            plot_y + (val / axis_max) * plot_h,
+                        )
+                    })
+                    .collect();
+                if let Some(&(x0, y0)) = pts.first() {
+                    content.move_to(x0, y0);
+                    if pts.len() >= 2 {
+                        for i in 0..pts.len() - 1 {
+                            let prev = if i > 0 {
+                                pts[i - 1]
+                            } else {
+                                (2.0 * pts[0].0 - pts[1].0, 2.0 * pts[0].1 - pts[1].1)
+                            };
+                            let next = if i + 2 < pts.len() {
+                                pts[i + 2]
+                            } else {
+                                let n = pts.len() - 1;
+                                (2.0 * pts[n].0 - pts[n - 1].0, 2.0 * pts[n].1 - pts[n - 1].1)
+                            };
+                            let cp1x = pts[i].0 + (pts[i + 1].0 - prev.0) / 6.0;
+                            let cp1y = pts[i].1 + (pts[i + 1].1 - prev.1) / 6.0;
+                            let cp2x = pts[i + 1].0 - (next.0 - pts[i].0) / 6.0;
+                            let cp2y = pts[i + 1].1 - (next.1 - pts[i].1) / 6.0;
+                            content.cubic_to(cp1x, cp1y, cp2x, cp2y, pts[i + 1].0, pts[i + 1].1);
+                        }
+                    }
+                }
+                content.stroke();
+
+                set_color(content, series.color);
+                let marker_r = 3.5;
+                let sym = resolve_marker(series.marker, si);
+                for (ci, &val) in series.values.iter().enumerate() {
+                    let lx = plot_x + (ci as f32 + 0.5) * group_w;
+                    let ly = plot_y + (val / axis_max) * plot_h;
+                    draw_marker(content, sym, lx, ly, marker_r);
+                }
+            }
+        }
+        ChartType::Area => {
+            let cat_w = plot_w / (num_categories - 1).max(1) as f32;
+            for series in &c.series {
+                let pts: Vec<(f32, f32)> = series
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(|(ci, &val)| {
+                        (
+                            plot_x + ci as f32 * cat_w,
+                            plot_y + (val / axis_max) * plot_h,
+                        )
+                    })
+                    .collect();
+
+                set_color(content, series.color);
+                content.move_to(plot_x, plot_y);
+                for &(lx, ly) in &pts {
+                    content.line_to(lx, ly);
+                }
+                if let Some(&(last_x, _)) = pts.last() {
+                    content.line_to(last_x, plot_y);
+                }
+                content.close_path();
+                content.fill_nonzero();
+
+                set_stroke_color(content, series.color);
+                content.set_line_width(1.5);
+                for (i, &(lx, ly)) in pts.iter().enumerate() {
+                    if i == 0 {
+                        content.move_to(lx, ly);
+                    } else {
+                        content.line_to(lx, ly);
+                    }
+                }
+                content.stroke();
+            }
+        }
+        ChartType::Scatter => {
+            for (si, series) in c.series.iter().enumerate() {
+                set_color(content, series.color);
+                let marker_r = 4.0;
+                let sym = resolve_marker(series.marker, si);
+                if let Some(ref x_vals) = series.x_values {
+                    for (&xv, &yv) in x_vals.iter().zip(series.values.iter()) {
+                        let px = plot_x + (xv / x_axis_max) * plot_w;
+                        let py = plot_y + (yv / axis_max) * plot_h;
+                        draw_marker(content, sym, px, py, marker_r);
+                    }
+                }
+            }
+        }
+        ChartType::Bubble => {
+            let max_size = c
+                .series
+                .iter()
+                .filter_map(|s| s.bubble_sizes.as_ref())
+                .flat_map(|bs| bs.iter().copied())
+                .fold(0.0f32, f32::max);
+            let min_r = 4.0;
+            let max_r = 22.0;
+
+            for series in &c.series {
+                set_color(content, series.color);
+                if let Some(alpha) = series.fill_alpha {
+                    let pct = (alpha * 100.0).round() as u8;
+                    let gs_name = format!("GSa{pct}");
+                    content.set_parameters(Name(gs_name.as_bytes()));
+                    alpha_states.insert(pct);
+                }
+                if let Some(color) = series.color {
+                    stroke_rgb(content, color);
+                }
+                content.set_line_width(1.0);
+                if let (Some(x_vals), Some(bsizes)) = (&series.x_values, &series.bubble_sizes) {
+                    for ((&xv, &yv), &bs) in
+                        x_vals.iter().zip(series.values.iter()).zip(bsizes.iter())
+                    {
+                        let px = plot_x + (xv / x_axis_max) * plot_w;
+                        let py = plot_y + (yv / axis_max) * plot_h;
+                        let r = if max_size > 0.0 {
+                            min_r + (bs / max_size).sqrt() * (max_r - min_r)
+                        } else {
+                            min_r
+                        };
+                        draw_circle(content, px, py, r);
+                        content.fill_nonzero_and_stroke();
+                    }
+                }
+                if series.fill_alpha.is_some() {
+                    content.set_parameters(Name(b"GSa100"));
+                    alpha_states.insert(100);
+                }
+            }
+        }
+        ChartType::Pie | ChartType::Doughnut { .. } | ChartType::Radar => unreachable!(),
+    }
+}
+
+pub(super) fn render_chart(
+    chart: &InlineChart,
+    content: &mut Content,
+    x: f32,
+    y: f32,
+    seen_fonts: &HashMap<String, FontEntry>,
+    default_font_name: &str,
+    alpha_states: &mut HashSet<u8>,
+) {
+    let c = &chart.chart;
+    let w = chart.display_width;
+    let h = chart.display_height;
+
+    let font_size = 10.0;
+    let label_font = seen_fonts.get(default_font_name);
+    let has_font = label_font.is_some();
+    let label_font_key = label_font
+        .map(|e| e.pdf_name.as_str())
+        .unwrap_or(default_font_name);
+
+    let num_categories = c
+        .cat_axis
+        .as_ref()
+        .map(|ax| ax.labels.len())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| c.series.first().map(|s| s.values.len()).unwrap_or(0));
+    let num_series = c.series.len();
+    if num_series == 0 {
+        return;
+    }
+    let is_scatter_like = matches!(c.chart_type, ChartType::Scatter | ChartType::Bubble);
+    if num_categories == 0 && !is_scatter_like {
+        return;
+    }
+
+    match c.chart_type {
+        ChartType::Pie => {
+            charts_radial::render_radial(chart, content, x, y, label_font_key, label_font, None);
+            return;
+        }
+        ChartType::Doughnut { hole_size_pct } => {
+            charts_radial::render_radial(
+                chart,
+                content,
+                x,
+                y,
+                label_font_key,
+                label_font,
+                Some(hole_size_pct),
+            );
+            return;
+        }
+        ChartType::Radar => {
+            render_radar(chart, content, x, y, has_font, label_font_key, label_font);
+            return;
+        }
+        _ => {}
+    }
+
+    let horizontal = matches!(
+        c.chart_type,
+        ChartType::Bar {
+            horizontal: true,
+            ..
+        }
+    );
+    let bar_grouping = match c.chart_type {
+        ChartType::Bar { grouping, .. } => grouping,
+        _ => BarGrouping::Clustered,
+    };
+    let is_stacked = bar_grouping == BarGrouping::Stacked;
+    let is_percent_stacked = bar_grouping == BarGrouping::PercentStacked;
+
+    let legend_pos = c.legend.as_ref().map(|l| l.position);
+    let has_legend = legend_pos.is_some();
+    let legend_on_right = legend_pos == Some(LegendPosition::Right);
+    let legend_on_bottom = legend_pos == Some(LegendPosition::Bottom);
+
+    let max_val = if is_stacked {
+        (0..num_categories)
+            .map(|ci| {
+                c.series
+                    .iter()
+                    .map(|s| s.values.get(ci).copied().unwrap_or(0.0))
+                    .sum::<f32>()
+            })
+            .fold(0.0f32, f32::max)
+    } else {
+        c.series
+            .iter()
+            .flat_map(|s| s.values.iter())
+            .copied()
+            .fold(0.0f32, f32::max)
+    };
+
+    let (tick_step, axis_max) = if is_percent_stacked {
+        (10.0, 100.0)
+    } else if matches!(c.chart_type, ChartType::Scatter) {
+        compute_axis_range(max_val, 10, 0.98)
+    } else {
+        compute_axis_range(max_val, 5, 0.9)
+    };
+    if axis_max <= 0.0 {
+        return;
+    }
+
+    let (x_axis_max, x_tick_step) = if is_scatter_like {
+        let x_max = c
+            .series
+            .iter()
+            .filter_map(|s| s.x_values.as_ref())
+            .flat_map(|xv| xv.iter())
+            .copied()
+            .fold(0.0f32, f32::max);
+        let (xts, xam) = compute_axis_range(x_max, 5, 0.9);
+        if xam <= 0.0 {
+            return;
+        }
+        (xam, xts)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let val_fmt = c.val_format_code.as_deref();
+    let max_tick_label = if is_percent_stacked {
+        "100%".to_string()
+    } else {
+        format_tick_label(axis_max, tick_step, val_fmt)
+    };
+    let val_label_w = text_width(&max_tick_label, font_size, label_font) + 15.0;
+
+    let is_point_chart = matches!(
+        c.chart_type,
+        ChartType::Line | ChartType::Area | ChartType::Scatter | ChartType::Bubble
+    );
+    let margin_left = if !horizontal { val_label_w } else { w * 0.12 };
+    let margin_right = if has_legend && legend_on_right {
+        let legend_swatch = 5.5;
+        let legend_gap = 8.0;
+        let max_label_w = c
+            .series
+            .iter()
+            .map(|s| text_width(&s.label, 10.0, label_font))
+            .fold(0.0f32, f32::max);
+        // Line/Area use wider line+marker legend swatches; Scatter/Bubble use small marker dots
+        let has_line_swatch = matches!(c.chart_type, ChartType::Line | ChartType::Area);
+        let swatch_w = if has_line_swatch { 20.0 } else { legend_swatch };
+        let computed = legend_gap + swatch_w + 6.0 + max_label_w + 12.0;
+        computed.max(w * 0.15)
+    } else if is_point_chart {
+        (w * 0.06).max(20.0)
+    } else {
+        8.0
+    };
+    let margin_top = h * 0.05;
+
+    // Estimate plot_w for label wrapping and thinning calculations
+    let plot_w_est = w - margin_left - margin_right;
+    let line_h = font_size + 2.0;
+
+    let max_wrap_lines = if !horizontal && !is_scatter_like && num_categories > 0 {
+        if let Some(ref cat_axis) = c.cat_axis {
+            let slot_w = plot_w_est / num_categories as f32;
+            cat_axis
+                .labels
+                .iter()
+                .map(|l| wrap_label(l, slot_w * 0.9, font_size, label_font).len())
+                .max()
+                .unwrap_or(1)
+        } else {
+            1
+        }
+    } else {
+        1
+    };
+
+    let cat_label_h = line_h * max_wrap_lines as f32 + 4.0;
+    let margin_bottom = if has_legend && legend_on_bottom {
+        h * 0.22
+    } else {
+        cat_label_h + 8.0
+    };
+
+    let plot_x = x + margin_left;
+    let plot_y = y - h + margin_bottom;
+    let plot_w = w - margin_left - margin_right;
+    let plot_h = h - margin_top - margin_bottom;
+
+    content.save_state();
+
+    // Gridlines and value-axis tick marks
+    if let Some(ref val_axis) = c.val_axis {
+        content.set_line_width(0.5);
+        let num_ticks = (axis_max / tick_step).round() as usize;
+        let tick_len = 4.0;
+
+        stroke_rgb(
+            content,
+            val_axis.gridline_color.unwrap_or(DEFAULT_AXIS_COLOR),
+        );
+        for i in 0..=num_ticks {
+            let frac = (i as f32 * tick_step) / axis_max;
+            if !horizontal {
+                let gy = plot_y + frac * plot_h;
+                content.move_to(plot_x, gy);
+                content.line_to(plot_x + plot_w, gy);
+            } else {
+                let gx = plot_x + frac * plot_w;
+                content.move_to(gx, plot_y);
+                content.line_to(gx, plot_y + plot_h);
+            }
+            content.stroke();
+        }
+
+        stroke_rgb(content, val_axis.line_color.unwrap_or(DEFAULT_AXIS_COLOR));
+        for i in 0..=num_ticks {
+            let frac = (i as f32 * tick_step) / axis_max;
+            if !horizontal {
+                let gy = plot_y + frac * plot_h;
+                content.move_to(plot_x - tick_len, gy);
+                content.line_to(plot_x, gy);
+            } else {
+                let gx = plot_x + frac * plot_w;
+                content.move_to(gx, plot_y - tick_len);
+                content.line_to(gx, plot_y);
+            }
+            content.stroke();
+        }
+    }
+
+    // X-axis tick marks for category/scatter axes
+    {
+        let axis_color = c
+            .cat_axis
+            .as_ref()
+            .and_then(|a| a.line_color)
+            .unwrap_or(DEFAULT_AXIS_COLOR);
+        stroke_rgb(content, axis_color);
+        content.set_line_width(0.5);
+        let tick_len = 4.0;
+        if is_scatter_like {
+            let num_ticks = (x_axis_max / x_tick_step).round() as usize;
+            for i in 0..=num_ticks {
+                let frac = (i as f32 * x_tick_step) / x_axis_max;
+                let gx = plot_x + frac * plot_w;
+                content.move_to(gx, plot_y - tick_len);
+                content.line_to(gx, plot_y);
+                content.stroke();
+            }
+        } else if !horizontal {
+            for ci in 0..=num_categories {
+                let gx = plot_x + (ci as f32 / num_categories as f32) * plot_w;
+                content.move_to(gx, plot_y - tick_len);
+                content.line_to(gx, plot_y);
+                content.stroke();
+            }
+        }
+    }
+
+    // Vertical gridlines for scatter/bubble
+    if is_scatter_like && let Some(color) = c.cat_axis.as_ref().and_then(|a| a.gridline_color) {
+        content.set_line_width(0.5);
+        stroke_rgb(content, color);
+        let num_ticks = (x_axis_max / x_tick_step).round() as usize;
+        for i in 0..=num_ticks {
+            let frac = (i as f32 * x_tick_step) / x_axis_max;
+            let gx = plot_x + frac * plot_w;
+            content.move_to(gx, plot_y);
+            content.line_to(gx, plot_y + plot_h);
+            content.stroke();
+        }
+    }
+
+    // Data rendering
+    draw_chart_series(
+        c,
+        content,
+        PlotRect {
+            x: plot_x,
+            y: plot_y,
+            w: plot_w,
+            h: plot_h,
+        },
+        num_categories,
+        axis_max,
+        x_axis_max,
+        alpha_states,
+    );
+
+    // Plot area border
+    content.set_line_width(0.75);
+    if let Some(border) = c.plot_border_color {
+        stroke_rgb(content, border);
+        content.rect(plot_x, plot_y, plot_w, plot_h);
+        content.stroke();
+    } else {
+        let axis_color = c
+            .val_axis
+            .as_ref()
+            .and_then(|a| a.line_color)
+            .unwrap_or(DEFAULT_AXIS_COLOR);
+        stroke_rgb(content, axis_color);
+        content.move_to(plot_x, plot_y);
+        content.line_to(plot_x, plot_y + plot_h);
+        content.stroke();
+        content.move_to(plot_x, plot_y);
+        content.line_to(plot_x + plot_w, plot_y);
+        content.stroke();
+    }
+
+    // Axis labels
+    if has_font {
+        content.set_fill_gray(0.0);
+
+        // Value axis tick labels
+        let num_ticks = (axis_max / tick_step).round() as usize;
+        for i in 0..=num_ticks {
+            let val = i as f32 * tick_step;
+            let label = if is_percent_stacked {
+                format!("{}%", val as i32)
+            } else {
+                format_tick_label(val, tick_step, val_fmt)
+            };
+            let tw = text_width(&label, font_size, label_font);
+            let frac = val / axis_max;
+
+            if !horizontal {
+                let ly = plot_y + frac * plot_h - font_size * 0.3;
+                let lx = plot_x - tw - 9.0;
+                show_text(
+                    content,
+                    label_font_key,
+                    font_size,
+                    lx,
+                    ly,
+                    &label,
+                    label_font,
+                );
+            } else {
+                let lx = plot_x + frac * plot_w - tw / 2.0;
+                let ly = plot_y - font_size - 8.0;
+                show_text(
+                    content,
+                    label_font_key,
+                    font_size,
+                    lx,
+                    ly,
+                    &label,
+                    label_font,
+                );
+            }
+        }
+
+        // X-axis tick labels for scatter/bubble
+        if is_scatter_like {
+            let num_x_ticks = (x_axis_max / x_tick_step).round() as usize;
+            for i in 0..=num_x_ticks {
+                let val = i as f32 * x_tick_step;
+                let label = format_tick_label(val, x_tick_step, None);
+                let tw = text_width(&label, font_size, label_font);
+                let frac = val / x_axis_max;
+                let lx = plot_x + frac * plot_w - tw / 2.0;
+                let ly = plot_y - font_size - 8.0;
+                show_text(
+                    content,
+                    label_font_key,
+                    font_size,
+                    lx,
+                    ly,
+                    &label,
+                    label_font,
+                );
+            }
+        }
+
+        // Category axis labels with auto-skip and multi-line wrapping
+        if !is_scatter_like && let Some(ref cat_axis) = c.cat_axis {
+            let label_skip = if !horizontal {
+                let slot_w = plot_w / num_categories.max(1) as f32;
+                // Measure the widest wrapped line to decide thinning.
+                // Labels that wrap at spaces are allowed to slightly exceed the slot.
+                let can_wrap = cat_axis.labels.iter().any(|l| l.contains(' '));
+                let max_wrapped_line_w = cat_axis
+                    .labels
+                    .iter()
+                    .flat_map(|l| wrap_label(l, slot_w, font_size, label_font))
+                    .map(|line| text_width(&line, font_size, label_font))
+                    .fold(0.0f32, f32::max);
+                // Word is tolerant of slight overflow for wrapped labels
+                let threshold = if can_wrap { slot_w * 1.5 } else { slot_w };
+                if max_wrapped_line_w > threshold {
+                    (max_wrapped_line_w / slot_w).ceil() as usize
+                } else {
+                    1
+                }
+            } else {
+                1
+            };
+
+            for (ci, label) in cat_axis.labels.iter().enumerate() {
+                if ci % label_skip != 0 {
+                    continue;
+                }
+                if !horizontal {
+                    let group_w = plot_w / num_categories as f32;
+                    let slot_w = group_w * label_skip as f32;
+                    let cx_center = plot_x + (ci as f32 + 0.5) * group_w;
+                    let lines = wrap_label(label, slot_w * 0.9, font_size, label_font);
+                    for (li, line) in lines.iter().enumerate() {
+                        let tw = text_width(line, font_size, label_font);
+                        let lx = cx_center - tw / 2.0;
+                        let ly = plot_y - font_size - 8.0 - (li as f32 * line_h);
+                        show_text(content, label_font_key, font_size, lx, ly, line, label_font);
+                    }
+                } else {
+                    let tw = text_width(label, font_size, label_font);
+                    let group_h = plot_h / num_categories as f32;
+                    let cy = plot_y + ci as f32 * group_h + group_h / 2.0 - font_size * 0.3;
+                    let cx = plot_x - tw - 9.0;
+                    show_text(
+                        content,
+                        label_font_key,
+                        font_size,
+                        cx,
+                        cy,
+                        label,
+                        label_font,
+                    );
+                }
+            }
+        }
+
+        // Legend
+        if let Some(ref legend) = c.legend {
+            let is_line = matches!(
+                c.chart_type,
+                ChartType::Line | ChartType::Scatter | ChartType::Bubble | ChartType::Radar
+            );
+            let is_bubble = matches!(c.chart_type, ChartType::Bubble);
+            let reverse_legend = matches!(
+                c.chart_type,
+                ChartType::Bar {
+                    horizontal: true,
+                    grouping: BarGrouping::Clustered,
+                } | ChartType::Bar {
+                    horizontal: false,
+                    grouping: BarGrouping::Stacked | BarGrouping::PercentStacked,
+                }
+            );
+            let series_order: Vec<(usize, &crate::model::ChartSeries)> = if reverse_legend {
+                c.series.iter().enumerate().rev().collect()
+            } else {
+                c.series.iter().enumerate().collect()
+            };
+            let items: Vec<LegendItem> = series_order
+                .iter()
+                .map(|&(si, series)| {
+                    let swatch = if is_line {
+                        SwatchStyle::Marker(if is_bubble {
+                            MarkerSymbol::Circle
+                        } else {
+                            resolve_marker(series.marker, si)
+                        })
+                    } else {
+                        SwatchStyle::Rect
+                    };
+                    LegendItem {
+                        label: &series.label,
+                        color: series.color.unwrap_or([0, 0, 0]),
+                        swatch,
+                    }
+                })
+                .collect();
+            let placement = match legend.position {
+                LegendPosition::Right => LegendPlacement::Right {
+                    x: plot_x + plot_w + 5.0,
+                    center_y: plot_y + plot_h / 2.0,
+                },
+                _ => LegendPlacement::Bottom {
+                    center_x: plot_x + plot_w / 2.0,
+                    y: y - h + 4.0,
+                },
+            };
+            render_chart_legend(
+                content,
+                &items,
+                placement,
+                label_font_key,
+                label_font,
+                5.5,
+                18.0,
+            );
+        }
+    }
+
+    content.set_fill_gray(0.0);
+    content.restore_state();
+}
+
+fn render_radar(
+    chart: &InlineChart,
+    content: &mut Content,
+    x: f32,
+    y: f32,
+    has_font: bool,
+    label_font_key: &str,
+    label_font: Option<&FontEntry>,
+) {
+    let c = &chart.chart;
+    let w = chart.display_width;
+    let h = chart.display_height;
+    let font_size = 10.0;
+
+    let num_categories = c
+        .cat_axis
+        .as_ref()
+        .map(|ax| ax.labels.len())
+        .unwrap_or_else(|| c.series.first().map(|s| s.values.len()).unwrap_or(0));
+    if num_categories == 0 || c.series.is_empty() {
+        return;
+    }
+
+    let legend_pos = c.legend.as_ref().map(|l| l.position);
+    let has_legend = legend_pos.is_some();
+    let legend_on_right = legend_pos == Some(LegendPosition::Right);
+    let legend_on_bottom = legend_pos == Some(LegendPosition::Bottom);
+
+    let max_val = c
+        .series
+        .iter()
+        .flat_map(|s| s.values.iter())
+        .copied()
+        .fold(0.0f32, f32::max);
+    let (tick_step, axis_max) = compute_axis_range(max_val, 4, 0.98);
+    if axis_max <= 0.0 {
+        return;
+    }
+
+    let margin_right = if has_legend && legend_on_right {
+        w * 0.22
+    } else {
+        w * 0.08
+    };
+    let margin_bottom = if has_legend && legend_on_bottom {
+        h * 0.18
+    } else {
+        h * 0.08
+    };
+    let margin_top = h * 0.08;
+    let margin_left = w * 0.08;
+
+    let avail_w = w - margin_left - margin_right;
+    let avail_h = h - margin_top - margin_bottom;
+    let radius = avail_w.min(avail_h) / 2.0 - 4.0;
+    let cx = x + margin_left + avail_w / 2.0;
+    let cy = y - margin_top - avail_h / 2.0;
+
+    let angle_step = 2.0 * std::f32::consts::PI / num_categories as f32;
+
+    // Angle for category i: start at top (pi/2) and go clockwise
+    let cat_angle = |ci: usize| -> f32 { std::f32::consts::FRAC_PI_2 - ci as f32 * angle_step };
+
+    content.save_state();
+
+    // Concentric polygon gridlines
+    let num_ticks = (axis_max / tick_step).round() as usize;
+    let grid_color = c
+        .val_axis
+        .as_ref()
+        .and_then(|a| a.gridline_color)
+        .unwrap_or(DEFAULT_AXIS_COLOR);
+    content.set_line_width(0.5);
+    stroke_rgb(content, grid_color);
+
+    for ti in 1..=num_ticks {
+        let r = radius * (ti as f32 / num_ticks as f32);
+        for ci in 0..num_categories {
+            let a = cat_angle(ci);
+            let px = cx + r * a.cos();
+            let py = cy + r * a.sin();
+            if ci == 0 {
+                content.move_to(px, py);
+            } else {
+                content.line_to(px, py);
+            }
+        }
+        content.close_path();
+        content.stroke();
+    }
+
+    // Radial spokes
+    for ci in 0..num_categories {
+        let a = cat_angle(ci);
+        content.move_to(cx, cy);
+        content.line_to(cx + radius * a.cos(), cy + radius * a.sin());
+        content.stroke();
+    }
+
+    // Series data polygons
+    let accent_colors = resolve_accent_colors(&c.accent_colors);
+
+    content.set_line_width(2.0);
+    for (si, series) in c.series.iter().enumerate() {
+        let color = series
+            .color
+            .unwrap_or(accent_colors[si % accent_colors.len()]);
+        stroke_rgb(content, color);
+        for ci in 0..num_categories {
+            let val = series.values.get(ci).copied().unwrap_or(0.0);
+            let r = (val / axis_max) * radius;
+            let a = cat_angle(ci);
+            let px = cx + r * a.cos();
+            let py = cy + r * a.sin();
+            if ci == 0 {
+                content.move_to(px, py);
+            } else {
+                content.line_to(px, py);
+            }
+        }
+        content.close_path();
+        content.stroke();
+
+        // Markers
+        set_color(content, Some(color));
+        let sym = resolve_marker(series.marker, si);
+        for ci in 0..num_categories {
+            let val = series.values.get(ci).copied().unwrap_or(0.0);
+            let r = (val / axis_max) * radius;
+            let a = cat_angle(ci);
+            draw_marker(content, sym, cx + r * a.cos(), cy + r * a.sin(), 4.0);
+        }
+    }
+
+    if has_font {
+        content.set_fill_gray(0.0);
+
+        // Category labels at perimeter — position based on spoke angle
+        if let Some(ref cat_axis) = c.cat_axis {
+            let label_r = radius + 4.0;
+            for (ci, label) in cat_axis.labels.iter().enumerate() {
+                let a = cat_angle(ci);
+                let cos_a = a.cos();
+                let sin_a = a.sin();
+                let lx = cx + label_r * cos_a;
+                let ly = cy + label_r * sin_a;
+                let tw = text_width(label, font_size, label_font);
+                // Horizontal: smoothly right-align on left side, left-align on right
+                let tx = lx - tw * (1.0 - cos_a) / 2.0;
+                // Vertical: top labels sit above vertex, bottom labels hang below
+                let ty = if sin_a > 0.5 {
+                    ly + font_size * 0.25
+                } else if sin_a < -0.3 {
+                    ly - font_size * 0.15
+                } else {
+                    ly - font_size * 0.3
+                };
+                show_text(
+                    content,
+                    label_font_key,
+                    font_size,
+                    tx,
+                    ty,
+                    label,
+                    label_font,
+                );
+            }
+        }
+
+        // Value labels along the 12 o'clock spoke (including "0" at center)
+        let val_gap = 12.0;
+        {
+            let tw = text_width("0", font_size, label_font);
+            show_text(
+                content,
+                label_font_key,
+                font_size,
+                cx - tw - val_gap,
+                cy - font_size * 0.3,
+                "0",
+                label_font,
+            );
+        }
+        for ti in 1..=num_ticks {
+            let val = ti as f32 * tick_step;
+            let label = format_tick_label(val, tick_step, None);
+            let r = radius * (ti as f32 / num_ticks as f32);
+            let ly = cy + r - font_size * 0.3;
+            let tw = text_width(&label, font_size, label_font);
+            show_text(
+                content,
+                label_font_key,
+                font_size,
+                cx - tw - val_gap,
+                ly,
+                &label,
+                label_font,
+            );
+        }
+
+        // Legend
+        if has_legend {
+            let items: Vec<LegendItem> = c
+                .series
+                .iter()
+                .enumerate()
+                .map(|(si, series)| {
+                    let color = series
+                        .color
+                        .unwrap_or(accent_colors[si % accent_colors.len()]);
+                    LegendItem {
+                        label: &series.label,
+                        color,
+                        swatch: SwatchStyle::LineMarker(resolve_marker(series.marker, si)),
+                    }
+                })
+                .collect();
+            let placement = if legend_on_right {
+                LegendPlacement::Right {
+                    x: x + w - margin_right + 10.0,
+                    center_y: cy,
+                }
+            } else {
+                LegendPlacement::Bottom {
+                    center_x: cx,
+                    y: y - h + 12.0,
+                }
+            };
+            render_chart_legend(
+                content,
+                &items,
+                placement,
+                label_font_key,
+                label_font,
+                5.5,
+                18.0,
+            );
+        }
+    }
+
+    content.set_fill_gray(0.0);
+    content.restore_state();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ceil_nice_zero_and_negative() {
+        assert_eq!(ceil_nice(0.0), 1.0);
+        assert_eq!(ceil_nice(-5.0), 1.0);
+    }
+
+    #[test]
+    fn test_ceil_nice_values() {
+        assert_eq!(ceil_nice(0.3), 0.2); // mag=0.1, norm=3.0, nice=2.0
+        assert_eq!(ceil_nice(0.8), 1.0); // mag=0.1, norm=8.0, nice=10.0
+        assert_eq!(ceil_nice(1.5), 1.0); // mag=1.0, norm=1.5, nice=1.0
+        assert_eq!(ceil_nice(25.0), 20.0); // mag=10, norm=2.5, nice=2.0
+        assert_eq!(ceil_nice(70.0), 50.0); // mag=10, norm=7.0, nice=5.0 (<=7.0)
+        assert_eq!(ceil_nice(15.0), 10.0); // mag=10, norm=1.5, nice=1.0
+        assert_eq!(ceil_nice(800.0), 1000.0);
+        assert_eq!(ceil_nice(3500.0), 5000.0);
+    }
+
+    #[test]
+    fn test_nice_tick_step() {
+        assert_eq!(nice_tick_step(100.0, 5), 20.0);
+        assert_eq!(nice_tick_step(1000.0, 5), 200.0);
+        assert_eq!(nice_tick_step(80.0, 5), 20.0);
+    }
+
+    #[test]
+    fn test_compute_axis_range_with_headroom() {
+        let (step, max) = compute_axis_range(100.0, 5, 0.9);
+        assert_eq!(step, 20.0);
+        assert_eq!(max, 120.0);
+    }
+
+    #[test]
+    fn test_compute_axis_range_tight() {
+        let (step, max) = compute_axis_range(85.0, 10, 0.98);
+        assert_eq!(step, 10.0);
+        assert_eq!(max, 90.0);
+    }
+
+    #[test]
+    fn test_format_tick_label_integer_step() {
+        assert_eq!(format_tick_label(100.0, 20.0, None), "100");
+        assert_eq!(format_tick_label(0.0, 10.0, None), "0");
+    }
+
+    #[test]
+    fn test_format_tick_label_fractional_step() {
+        assert_eq!(format_tick_label(1.5, 0.5, None), "1.5");
+    }
+
+    #[test]
+    fn test_format_tick_label_with_format_code() {
+        assert_eq!(format_tick_label(1234.5, 100.0, Some("#,##0")), "1,234");
+        assert_eq!(format_tick_label(0.15, 0.1, Some("0.0%")), "15.0%");
+    }
+
+    #[test]
+    fn test_apply_number_format_basic() {
+        assert_eq!(apply_number_format(1234.56, "0.00"), "1234.56");
+        assert_eq!(apply_number_format(1234.0, "0"), "1234");
+    }
+
+    #[test]
+    fn test_apply_number_format_comma() {
+        assert_eq!(apply_number_format(1234567.0, "#,##0"), "1,234,567");
+        assert_eq!(apply_number_format(999.0, "#,##0"), "999");
+    }
+
+    #[test]
+    fn test_apply_number_format_percent() {
+        assert_eq!(apply_number_format(0.15, "0%"), "15%");
+        assert_eq!(apply_number_format(1.0, "0%"), "100%");
+    }
+
+    #[test]
+    fn test_insert_thousands_separator() {
+        assert_eq!(insert_thousands_separator("1234"), "1,234");
+        assert_eq!(insert_thousands_separator("1234567"), "1,234,567");
+        assert_eq!(insert_thousands_separator("999"), "999");
+        assert_eq!(insert_thousands_separator("1234.56"), "1,234.56");
+        assert_eq!(insert_thousands_separator("-1234"), "-1,234");
+    }
+
+    #[test]
+    fn test_text_width_approx() {
+        assert_eq!(text_width_approx("Hello", 12.0), 30.0);
+        assert_eq!(text_width_approx("", 12.0), 0.0);
+        assert_eq!(text_width_approx("A", 10.0), 5.0);
+    }
+}

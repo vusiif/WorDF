@@ -1,0 +1,375 @@
+mod definitions;
+mod formulas;
+mod path;
+pub mod text_warp_definitions;
+
+use crate::model::CustomGeometry;
+
+use definitions::PresetDef;
+pub use formulas::FormulaOp;
+use formulas::GuideEnv;
+use path::PathCommandDef;
+pub use path::{PathFill, ResolvedCommand};
+
+pub struct EvaluatedPath {
+    pub commands: Vec<ResolvedCommand>,
+    #[allow(dead_code)]
+    pub fill: PathFill,
+    pub stroke: bool,
+}
+
+pub struct EvaluatedShape {
+    pub paths: Vec<EvaluatedPath>,
+    pub text_rect: Option<(f64, f64, f64, f64)>,
+}
+
+// 1 point = 12700 EMU. Preserves precision for the integer formula evaluator.
+const EMU_SCALE: f64 = 12700.0;
+
+/// A shape under evaluation: its guides, its size in points and the EMU-scaled
+/// coordinate space the guides are computed in.
+struct Frame {
+    env: GuideEnv,
+    w: f64,
+    h: f64,
+    wi: i64,
+    hi: i64,
+}
+
+impl Frame {
+    fn new(w: f64, h: f64) -> Self {
+        let wi = (w * EMU_SCALE) as i64;
+        let hi = (h * EMU_SCALE) as i64;
+        Frame {
+            env: GuideEnv::new(wi, hi),
+            w,
+            h,
+            wi,
+            hi,
+        }
+    }
+
+    /// Resolve one path; its own w/h, when given, replace the shape's coordinate space.
+    fn path<'a>(
+        &self,
+        commands: impl Iterator<Item = PathCommandDef<&'a str>>,
+        (w, h): (Option<i64>, Option<i64>),
+        fill: PathFill,
+        stroke: bool,
+    ) -> EvaluatedPath {
+        let path_w = w.unwrap_or(self.wi) as f64;
+        let path_h = h.unwrap_or(self.hi) as f64;
+        EvaluatedPath {
+            commands: path::resolve_path(commands, &self.env, self.w, self.h, path_w, path_h),
+            fill,
+            stroke,
+        }
+    }
+}
+
+pub fn evaluate_preset(
+    name: &str,
+    w: f64,
+    h: f64,
+    adj_overrides: &[(String, i64)],
+) -> Option<EvaluatedShape> {
+    let def = definitions::lookup(name)?;
+    Some(evaluate_def(def, w, h, adj_overrides))
+}
+
+pub fn evaluate_def(
+    def: &PresetDef,
+    w: f64,
+    h: f64,
+    adj_overrides: &[(String, i64)],
+) -> EvaluatedShape {
+    let mut frame = Frame::new(w, h);
+    frame
+        .env
+        .set_adjustments(def.adjust_defaults, adj_overrides);
+    frame.env.evaluate_guides(def.guides);
+
+    let paths = def
+        .paths
+        .iter()
+        .map(|p| frame.path(p.commands.iter().copied(), (p.w, p.h), p.fill, p.stroke))
+        .collect();
+
+    let text_rect = def.text_rect.as_ref().map(|tr| {
+        let l = frame.env.resolve(tr.l) as f64 / EMU_SCALE;
+        let t = frame.env.resolve(tr.t) as f64 / EMU_SCALE;
+        let r = frame.env.resolve(tr.r) as f64 / EMU_SCALE;
+        let b = frame.env.resolve(tr.b) as f64 / EMU_SCALE;
+        (l, h - b, r - l, b - t)
+    });
+
+    EvaluatedShape { paths, text_rect }
+}
+
+pub fn evaluate_custom(
+    custom: &CustomGeometry,
+    w: f64,
+    h: f64,
+    adj_overrides: &[(String, i64)],
+) -> EvaluatedShape {
+    let mut frame = Frame::new(w, h);
+    frame.env.set_adjustments(&[], &custom.adjust_defaults);
+    frame.env.set_adjustments(&[], adj_overrides);
+    frame.env.evaluate_custom_guides(&custom.guides);
+
+    let paths = custom
+        .paths
+        .iter()
+        .map(|p| {
+            frame.path(
+                p.commands.iter().map(PathCommandDef::from),
+                (p.w, p.h),
+                p.fill,
+                p.stroke,
+            )
+        })
+        .collect();
+
+    EvaluatedShape {
+        paths,
+        text_rect: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evaluate_preset_unknown() {
+        assert!(evaluate_preset("nonexistent_shape", 100.0, 50.0, &[]).is_none());
+    }
+
+    fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() < tol
+    }
+
+    /// Verify geometry engine rect matches the hand-coded `content.rect(x, y, w, h)`.
+    ///
+    /// PDF rect(0, 0, w, h) covers corners (0,0)-(w,0)-(w,h)-(0,h).
+    /// Geometry engine produces MoveTo(0,h) LineTo(w,h) LineTo(w,0) LineTo(0,0) Close.
+    /// Both describe the same rectangle.
+    #[test]
+    fn test_rect_matches_handcoded() {
+        let w = 100.0;
+        let h = 50.0;
+        let shape = evaluate_preset("rect", w, h, &[]).unwrap();
+        let cmds = &shape.paths[0].commands;
+
+        assert_eq!(cmds.len(), 5);
+        // Top-left in PDF coords (OOXML origin 0,0 -> PDF 0,h)
+        assert!(
+            matches!(&cmds[0], ResolvedCommand::MoveTo(x, y) if approx_eq(*x, 0.0, 0.01) && approx_eq(*y, h, 0.01))
+        );
+        // Top-right
+        assert!(
+            matches!(&cmds[1], ResolvedCommand::LineTo(x, y) if approx_eq(*x, w, 0.01) && approx_eq(*y, h, 0.01))
+        );
+        // Bottom-right
+        assert!(
+            matches!(&cmds[2], ResolvedCommand::LineTo(x, y) if approx_eq(*x, w, 0.01) && approx_eq(*y, 0.0, 0.01))
+        );
+        // Bottom-left
+        assert!(
+            matches!(&cmds[3], ResolvedCommand::LineTo(x, y) if approx_eq(*x, 0.0, 0.01) && approx_eq(*y, 0.0, 0.01))
+        );
+        assert!(matches!(&cmds[4], ResolvedCommand::Close));
+    }
+
+    /// Verify geometry engine ellipse approximates the same curve as the hand-coded
+    /// 4-cubic-bezier approach using K=0.5522847498.
+    ///
+    /// The hand-coded ellipse starts at (cx+rx, cy) and goes counterclockwise.
+    /// The geometry engine starts at (l, vc) = (0, h/2) and goes clockwise in OOXML
+    /// (counterclockwise after y-flip).
+    ///
+    /// We verify the ellipse passes through the 4 cardinal points.
+    #[test]
+    fn test_ellipse_matches_handcoded() {
+        let w = 100.0;
+        let h = 80.0;
+        let shape = evaluate_preset("ellipse", w, h, &[]).unwrap();
+        let cmds = &shape.paths[0].commands;
+
+        // Starts at left center: (0, h/2) in PDF coords
+        assert!(
+            matches!(&cmds[0], ResolvedCommand::MoveTo(x, y) if approx_eq(*x, 0.0, 0.1) && approx_eq(*y, h / 2.0, 0.1))
+        );
+
+        // Collect all endpoints from the cubic segments
+        let endpoints: Vec<(f64, f64)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                ResolvedCommand::CubicTo { x, y, .. } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+
+        // 4 arcs of 90 degrees each produce 4 cubic segments
+        assert_eq!(
+            endpoints.len(),
+            4,
+            "Expected 4 cubic bezier segments for 4 quarter-arcs"
+        );
+
+        // After each 90° arc, should hit: top center, right center, bottom center, left center
+        let cardinal_points = [
+            (w / 2.0, h),   // top center
+            (w, h / 2.0),   // right center
+            (w / 2.0, 0.0), // bottom center
+            (0.0, h / 2.0), // left center (back to start)
+        ];
+
+        for (i, (ex, ey)) in cardinal_points.iter().enumerate() {
+            let (gx, gy) = endpoints[i];
+            assert!(
+                approx_eq(gx, *ex, 0.5) && approx_eq(gy, *ey, 0.5),
+                "Arc {i} endpoint ({gx:.2}, {gy:.2}) != expected ({ex:.2}, {ey:.2})"
+            );
+        }
+
+        // Verify the cubic control points approximate the K=0.5522847498 formula
+        // For the first arc (left center -> top center), the hand-coded version would use:
+        //   K = 0.5522847498, rx = w/2, ry = h/2
+        // Starting at (0, h/2), ending at (w/2, h):
+        //   cp1 = (0, h/2 + K*ry) = (0, 40 + 0.5523*40) = (0, 62.09)
+        //   cp2 = (w/2 - K*rx, h) = (50 - 0.5523*50, 80) = (22.39, 80)
+        let k = 0.5522847498_f64;
+        let rx = w / 2.0;
+        let ry = h / 2.0;
+        if let ResolvedCommand::CubicTo { x1, y1, x2, y2, .. } = &cmds[1] {
+            let expected_cp1x = 0.0;
+            let expected_cp1y = h / 2.0 + k * ry;
+            let expected_cp2x = w / 2.0 - k * rx;
+            let expected_cp2y = h;
+            assert!(
+                approx_eq(*x1, expected_cp1x, 0.5) && approx_eq(*y1, expected_cp1y, 0.5),
+                "CP1 ({x1:.2}, {y1:.2}) != expected ({expected_cp1x:.2}, {expected_cp1y:.2})"
+            );
+            assert!(
+                approx_eq(*x2, expected_cp2x, 0.5) && approx_eq(*y2, expected_cp2y, 0.5),
+                "CP2 ({x2:.2}, {y2:.2}) != expected ({expected_cp2x:.2}, {expected_cp2y:.2})"
+            );
+        } else {
+            panic!("Expected CubicTo as first arc segment");
+        }
+    }
+
+    /// Verify geometry engine notchedRightArrow matches the hand-coded version exactly.
+    ///
+    /// Hand-coded (w=200, h=100, at origin):
+    ///   ss=100, arrow_dx=50, arrow_start=150, shaft_inset=25, notch_depth=25
+    ///   Vertices: (0,75) (150,75) (150,100) (200,50) (150,0) (150,25) (0,25) (25,50)
+    #[test]
+    fn test_notched_right_arrow_matches_handcoded() {
+        let w = 200.0;
+        let h = 100.0;
+        let shape = evaluate_preset("notchedRightArrow", w, h, &[]).unwrap();
+        let cmds = &shape.paths[0].commands;
+
+        // Hand-coded vertices in PDF coords (y=0 is bottom)
+        let expected = [
+            (0.0, 75.0),    // (l, y1): shaft top-left
+            (150.0, 75.0),  // (x2, y1): shaft top-right
+            (150.0, 100.0), // (x2, t): arrowhead top
+            (200.0, 50.0),  // (r, vc): arrowhead tip
+            (150.0, 0.0),   // (x2, b): arrowhead bottom
+            (150.0, 25.0),  // (x2, y2): shaft bottom-right
+            (0.0, 25.0),    // (l, y2): shaft bottom-left
+            (25.0, 50.0),   // (x1, vc): notch point
+        ];
+
+        assert_eq!(
+            cmds.len(),
+            9,
+            "Expected 9 commands: MoveTo + 7 LineTo + Close"
+        );
+        assert!(
+            matches!(&cmds[0], ResolvedCommand::MoveTo(x, y) if approx_eq(*x, expected[0].0, 0.01) && approx_eq(*y, expected[0].1, 0.01)),
+            "MoveTo mismatch: got {:?}, expected {:?}",
+            cmds[0],
+            expected[0]
+        );
+        for i in 1..8 {
+            assert!(
+                matches!(&cmds[i], ResolvedCommand::LineTo(x, y) if approx_eq(*x, expected[i].0, 0.01) && approx_eq(*y, expected[i].1, 0.01)),
+                "LineTo {i} mismatch: got {:?}, expected {:?}",
+                cmds[i],
+                expected[i]
+            );
+        }
+        assert!(matches!(&cmds[8], ResolvedCommand::Close));
+    }
+
+    /// circularArrow with case59 adjustments must produce a crescent, not a blob.
+    ///
+    /// The guide formulas compute circle-circle intersections via squared-distance
+    /// products (q5 = q3 * q4 / 1) that exceed i64 range at EMU scale. With i128
+    /// guide storage, the intersection is computed correctly and the path forms a
+    /// thin crescent arc with arrowhead.
+    #[test]
+    fn test_circular_arrow_crescent_not_blob() {
+        let adjs = vec![
+            ("adj1".into(), 4688_i64),
+            ("adj2".into(), 299029),
+            ("adj3".into(), 2486671),
+            ("adj4".into(), 15926341),
+            ("adj5".into(), 5469),
+        ];
+        let w = 177.4;
+        let h = 177.4;
+        let shape = evaluate_preset("circularArrow", w, h, &adjs).unwrap();
+        let cmds = &shape.paths[0].commands;
+
+        // Must have cubic segments (from the two arcs)
+        let cubic_count = cmds
+            .iter()
+            .filter(|c| matches!(c, ResolvedCommand::CubicTo { .. }))
+            .count();
+        assert!(
+            cubic_count >= 4,
+            "Expected at least 4 cubic segments from two arcs, got {cubic_count}"
+        );
+
+        // Collect the LineTo points (the arrowhead vertices between the two arcs).
+        // In a correct crescent, these cluster near each other (small arrowhead).
+        // In the blob case, they scatter across the full shape.
+        let line_pts: Vec<(f64, f64)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                ResolvedCommand::LineTo(x, y) => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            line_pts.len(),
+            4,
+            "Expected 4 LineTo commands for arrowhead"
+        );
+
+        // The 4 arrowhead points should span a small region (< 30% of shape size)
+        let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in &line_pts {
+            x_min = x_min.min(x);
+            x_max = x_max.max(x);
+            y_min = y_min.min(y);
+            y_max = y_max.max(y);
+        }
+        let x_span = x_max - x_min;
+        let y_span = y_max - y_min;
+        assert!(
+            x_span < w * 0.3,
+            "Arrowhead x-span {x_span:.1} is too large (> 30% of {w})"
+        );
+        assert!(
+            y_span < h * 0.3,
+            "Arrowhead y-span {y_span:.1} is too large (> 30% of {h})"
+        );
+    }
+}

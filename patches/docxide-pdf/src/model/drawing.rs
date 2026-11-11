@@ -1,0 +1,436 @@
+use std::sync::Arc;
+
+use crate::geometry::{FormulaOp, PathFill};
+
+use super::{
+    HRelativeFrom, HorizontalPosition, Paragraph, VRelativeFrom, VerticalPosition, WrapText,
+    WrapType,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImageFormat {
+    Jpeg,
+    Png,
+    Bmp,
+    /// Enhanced Metafile — a vector graphics format. Embedded as a PDF Form
+    /// XObject (PDF drawing operators) rather than a raster Image XObject.
+    Emf,
+}
+
+#[derive(Clone)]
+pub struct EmbeddedImage {
+    /// Preview of an actual Office OLE object, not an ordinary or static VML picture.
+    pub is_ole_preview: bool,
+    /// `wp:docPr/@descr`, which Word exports as the Figure's /Alt.
+    pub alt: Option<String>,
+    /// Marked decorative in Word (Office 2019+): an artifact, not a Figure.
+    pub decorative: bool,
+    pub data: Arc<Vec<u8>>,
+    pub format: ImageFormat,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub display_width: f32,
+    pub display_height: f32,
+    pub jpeg_components: u8,
+    /// effectExtent + distT/distB combined (points)
+    pub layout_extra_height: f32,
+    /// effectExtent.t + distT (points)
+    pub layout_extra_top: f32,
+    pub stroke_color: Option<[u8; 3]>,
+    pub stroke_width: f32,
+    pub shadow: Option<ImageShadow>,
+    pub soft_edge: Option<SoftEdge>,
+    pub glow: Option<ImageGlow>,
+    pub inner_shadow: Option<InnerShadow>,
+    pub reflection: Option<ImageReflection>,
+    /// Non-rectangular clip shape (e.g. "ellipse"). None means standard rect (no clipping).
+    pub clip_geometry: Option<ShapeGeometry>,
+    /// `a:srcRect` crop as (left, top, right, bottom) fractions of the source image.
+    /// None when the picture is uncropped. Negative values pad the frame with blank space.
+    pub src_rect: Option<[f32; 4]>,
+    /// `a:lum` picture recolouring as (brightness, contrast) fractions of ±1.0.
+    /// None when both are zero. Applied to the decoded pixels at embed time, so
+    /// only raster formats honour it; an EMF keeps its colours.
+    pub lum: Option<(f32, f32)>,
+    /// In-plane rotation in degrees, clockwise (OOXML convention). Sourced from
+    /// `a:xfrm @rot` or a 3D scene camera `a:scene3d/a:camera/a:rot @rev`.
+    /// Applied as a rotation about the picture's center at render time.
+    pub rotation_deg: f32,
+}
+
+impl EmbeddedImage {
+    /// Identity of the picture bytes, the key of the image name maps: pictures
+    /// sharing one `Arc` of data are embedded once.
+    pub fn key(&self) -> usize {
+        Arc::as_ptr(&self.data) as usize
+    }
+
+    /// Size of the box an inline picture occupies in the line: the bounding box of
+    /// the rotated frame. Word gives the 56×108pt signature turned -90° on
+    /// italian_evaluation_minutes p7 a 56pt line, not 108pt.
+    pub fn layout_size(&self) -> (f32, f32) {
+        let (sin, cos) = self.rotation_deg.to_radians().sin_cos();
+        let (s, c) = (sin.abs(), cos.abs());
+        (
+            self.display_width * c + self.display_height * s,
+            self.display_width * s + self.display_height * c,
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageShadow {
+    pub offset_x: f32,    // points, positive = right
+    pub offset_y: f32,    // points, positive = down (screen coords, not PDF)
+    pub blur_radius: f32, // points
+    pub color: [u8; 3],
+    pub alpha: f32, // 0.0–1.0
+}
+
+#[derive(Clone, Debug)]
+pub struct SoftEdge {
+    pub radius: f32, // points
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageGlow {
+    pub radius: f32, // points
+    pub color: [u8; 3],
+    pub alpha: f32, // 0.0–1.0
+}
+
+#[derive(Clone, Debug)]
+pub struct InnerShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur_radius: f32,
+    pub color: [u8; 3],
+    pub alpha: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageReflection {
+    pub start_alpha: f32, // 0.0–1.0
+    pub end_alpha: f32,   // 0.0–1.0
+    pub distance: f32,    // points (gap between image and reflection)
+    /// Fraction of image height visible in the reflection (0.0–1.0). 1.0 = full image.
+    pub end_pos: f32,
+}
+
+#[derive(Clone)]
+pub struct FloatingImage {
+    pub image: EmbeddedImage,
+    pub h_position: HorizontalPosition,
+    pub h_relative_from: HRelativeFrom,
+    pub v_position: VerticalPosition,
+    pub v_relative_from: VRelativeFrom,
+    pub wrap_type: WrapType,
+    pub wrap_text: WrapText,
+    /// Vertices in 1/21600 of extent (OOXML wrapPolygon coordinate space)
+    pub wrap_polygon: Option<Vec<(i32, i32)>>,
+    pub behind_doc: bool,
+    pub dist_top: f32,
+    pub dist_bottom: f32,
+    pub dist_left: f32,
+    pub dist_right: f32,
+    /// OOXML wp:anchor @relativeHeight — the z-order among foreground floating
+    /// objects. Higher draws on top. Used to composite foreground floating
+    /// images into the same z-stack as textboxes/connectors.
+    pub z_index: u32,
+    /// Position among the paragraph's floating pictures and textboxes in XML
+    /// order: their tags follow the anchors' order, not the drawing order.
+    pub anchor_seq: u32,
+    /// Flattened from an inline canvas: its offset counts from the line top,
+    /// as for `Textbox::on_line`.
+    pub on_line: bool,
+}
+
+/// Covers all 187 OOXML preset shapes and arbitrary custom geometry (a:custGeom).
+#[derive(Clone, Debug)]
+pub struct ShapeGeometry {
+    pub preset: Option<String>,
+    pub adjustments: Vec<(String, i64)>,
+    pub custom: Option<CustomGeometry>,
+}
+
+impl Default for ShapeGeometry {
+    fn default() -> Self {
+        Self {
+            preset: Some("rect".to_string()),
+            adjustments: Vec::new(),
+            custom: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CustomGeometry {
+    pub adjust_defaults: Vec<(String, i64)>,
+    pub guides: Vec<CustomGuideDef>,
+    pub paths: Vec<CustomPathDef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CustomGuideDef {
+    pub name: String,
+    pub op: FormulaOp,
+    pub x: String,
+    pub y: String,
+    pub z: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CustomPathDef {
+    pub commands: Vec<CustomPathCommand>,
+    pub w: Option<i64>,
+    pub h: Option<i64>,
+    pub fill: PathFill,
+    pub stroke: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum CustomPathCommand {
+    MoveTo {
+        x: String,
+        y: String,
+    },
+    LineTo {
+        x: String,
+        y: String,
+    },
+    ArcTo {
+        wr: String,
+        hr: String,
+        st_ang: String,
+        sw_ang: String,
+    },
+    CubicBezTo {
+        x1: String,
+        y1: String,
+        x2: String,
+        y2: String,
+        x3: String,
+        y3: String,
+    },
+    QuadBezTo {
+        x1: String,
+        y1: String,
+        x2: String,
+        y2: String,
+    },
+    Close,
+}
+
+#[derive(Clone, Copy, Default)]
+pub enum SmartArtTextAnchor {
+    #[default]
+    Top,
+    Center,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Default)]
+pub enum SmartArtTextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+pub struct SmartArtRun {
+    pub text: String,
+    pub font_name: Option<String>,
+    pub font_size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub color: Option<[u8; 3]>,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// Baseline shift in 1000ths of %. >0 = superscript, <0 = subscript.
+    pub baseline: i32,
+    pub highlight: Option<[u8; 3]>,
+}
+
+pub struct SmartArtPara {
+    pub runs: Vec<SmartArtRun>,
+    pub bullet: Option<String>,
+    pub align: SmartArtTextAlign,
+    /// Line spacing as a multiplier (e.g. 0.9 for 90%). 0.0 = use default 1.2.
+    pub line_spacing_pct: f32,
+}
+
+pub struct SmartArtShape {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Rotation in degrees (clockwise in OOXML, converted for PDF)
+    pub rotation_deg: f32,
+    pub shape_type: ShapeGeometry,
+    pub fill: Option<[u8; 3]>,
+    pub image_fill: Option<EmbeddedImage>,
+    pub stroke_color: Option<[u8; 3]>,
+    pub stroke_width: f32,
+    pub paragraphs: Vec<SmartArtPara>,
+    /// Separate text rectangle from dsp:txXfrm (x, y, w, h in pts)
+    pub text_rect: Option<(f32, f32, f32, f32)>,
+    /// Body insets from a:bodyPr (top, right, bottom, left) in pts
+    pub text_insets: (f32, f32, f32, f32),
+    pub text_anchor: SmartArtTextAnchor,
+}
+
+pub struct SmartArtDiagram {
+    pub display_height: f32,
+    pub shapes: Vec<SmartArtShape>,
+    /// Where a floating (wrapNone) diagram sits; None when it is inline.
+    pub anchor: Option<DiagramAnchor>,
+}
+
+pub struct DiagramAnchor {
+    pub h_position: HorizontalPosition,
+    pub h_relative_from: HRelativeFrom,
+    pub v_position: VerticalPosition,
+    pub v_relative_from: VRelativeFrom,
+    pub width: f32,
+    /// wp:anchor relativeHeight, as for connectors.
+    pub z_index: u32,
+}
+
+#[derive(Clone)]
+pub enum ConnectorType {
+    Line {
+        flip_h: bool,
+        flip_v: bool,
+    },
+    Arc {
+        start_angle: f32,
+        end_angle: f32,
+        rotation: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArrowEnd {
+    #[default]
+    None,
+    Arrow,
+    Triangle,
+    Stealth,
+    Diamond,
+    Oval,
+}
+
+impl ArrowEnd {
+    pub fn from_attr(s: &str) -> Self {
+        match s {
+            "triangle" => Self::Triangle,
+            "stealth" => Self::Stealth,
+            "diamond" => Self::Diamond,
+            "oval" => Self::Oval,
+            "arrow" => Self::Arrow,
+            _ => Self::None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ConnectorShape {
+    /// Anchored connector belongs behind paragraph text and inline pictures.
+    pub behind_doc: bool,
+    /// The anchor's position and the frame it is measured from: a page- or
+    /// margin-anchored line must not follow its paragraph.
+    pub h_position: HorizontalPosition,
+    pub h_relative_from: HRelativeFrom,
+    pub v_position: VerticalPosition,
+    pub v_relative_from: VRelativeFrom,
+    pub width: f32,
+    pub height: f32,
+    pub stroke_color: [u8; 3],
+    pub stroke_width: f32,
+    pub connector_type: ConnectorType,
+    pub head_end: ArrowEnd,
+    pub tail_end: ArrowEnd,
+    /// wp:anchor relativeHeight — stacking order among overlapping anchored
+    /// shapes within a page (higher draws on top). 0 when unspecified.
+    pub z_index: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+pub enum TextAnchor {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+pub enum ShapeFill {
+    Solid([u8; 3]),
+    LinearGradient {
+        stops: Vec<([u8; 3], f32)>,
+        angle_deg: f32,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct TextWarp {
+    pub preset: String,
+    pub adjustments: Vec<(String, i64)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum AutoFit {
+    #[default]
+    None,
+    Normal,
+    Shape,
+}
+
+#[derive(Default)]
+pub struct Textbox {
+    pub paragraphs: Vec<Paragraph>,
+    pub width_pt: f32,
+    /// `wp14:sizeRelH relativeFrom="margin"` pctWidth as a fraction: the
+    /// width is that share of the section's text width (resolved into
+    /// `width_pt` once the section is known).
+    pub width_pct_margin: Option<f32>,
+    pub height_pt: f32,
+    pub h_position: HorizontalPosition,
+    pub h_relative_from: HRelativeFrom,
+    /// Resolved offset for paths that need a single f32 (content-height
+    /// reservation, paragraph-relative tb_y_top). For `AlignTop/Center/Bottom`
+    /// this is 0 — the alignment is preserved in `v_position`, which the
+    /// y_top resolver consults when it has the section dimensions.
+    pub v_offset_pt: f32,
+    /// Full vertical anchoring intent. `Offset(o)` matches `v_offset_pt = o`;
+    /// the `AlignTop`/`AlignCenter`/`AlignBottom` variants need section
+    /// geometry to compute their final y, which the renderer does.
+    pub v_position: VerticalPosition,
+    pub v_relative_from: VRelativeFrom,
+    pub fill: Option<ShapeFill>,
+    pub shape_type: ShapeGeometry,
+    pub stroke_color: Option<[u8; 3]>,
+    pub stroke_width: f32,
+    pub text_anchor: TextAnchor,
+    pub margin_left: f32,
+    pub margin_right: f32,
+    pub margin_top: f32,
+    pub margin_bottom: f32,
+    pub wrap_type: WrapType,
+    pub wrap_text: WrapText,
+    pub dist_bottom: f32,
+    pub behind_doc: bool,
+    pub no_text_wrap: bool,
+    pub text_warp: Option<TextWarp>,
+    pub auto_fit: AutoFit,
+    /// wp:anchor relativeHeight — stacking order among overlapping anchored
+    /// shapes within a paragraph (higher draws on top). 0 when unspecified.
+    pub z_index: u32,
+    /// See `FloatingImage::anchor_seq`.
+    pub anchor_seq: u32,
+    /// Sits on the line rather than hanging from a paragraph anchor: children
+    /// flattened from an *inline* drawing canvas, and inline text boxes. They
+    /// flow at the paragraph's text-start, so their Column-relative x includes
+    /// the paragraph's left indent, and their offsets count from the line top
+    /// below the space before. Genuine anchored floats do neither.
+    pub on_line: bool,
+}

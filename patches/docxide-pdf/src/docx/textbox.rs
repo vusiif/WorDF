@@ -1,0 +1,1027 @@
+use std::io::Read;
+
+use crate::geometry::{FormulaOp, PathFill};
+use crate::model::{
+    ArrowEnd, AutoFit, ConnectorShape, ConnectorType, CustomGeometry, CustomGuideDef,
+    CustomPathCommand, CustomPathDef, HRelativeFrom, HorizontalPosition, Paragraph, ShapeFill,
+    ShapeGeometry, TextAnchor, TextWarp, Textbox, VRelativeFrom, VerticalPosition,
+};
+
+use super::color::{
+    apply_color_transforms, parse_line_stroke, parse_solid_fill, resolve_dml_color,
+};
+use super::images::{extent_dimensions, parse_anchor_position};
+use super::styles::{ThemeFillStyle, ThemeFonts};
+use super::{
+    DML_NS, MC_NS_TOP, OFFICE_NS, ParseContext, VML_NS, WML_NS, WPD_NS, WPS_NS, angle_attr,
+    dml as find_dml, dml_children as find_dml_all, emu_attr, emu_attr_opt, frac_attr, parse_pt,
+    wps as find_wps,
+};
+
+struct VmlBoxStyle {
+    width: f32,
+    height: f32,
+    margin_left: f32,
+    margin_top: f32,
+    h_relative: HRelativeFrom,
+    v_relative: VRelativeFrom,
+    /// A negative z-index puts the shape behind the text.
+    behind_text: bool,
+}
+
+/// Parse a VML shape `style` attribute (semicolon-separated `key:val`) into box
+/// geometry: dimensions/margins in points and the position-relative anchors.
+fn parse_vml_box_style(style_str: &str) -> VmlBoxStyle {
+    let mut s = VmlBoxStyle {
+        width: 0.0,
+        height: 0.0,
+        margin_left: 0.0,
+        margin_top: 0.0,
+        h_relative: HRelativeFrom::Column,
+        v_relative: VRelativeFrom::Paragraph,
+        behind_text: false,
+    };
+    for part in style_str.split(';') {
+        if let Some((key, val)) = part.trim().split_once(':') {
+            let val = val.trim();
+            match key.trim() {
+                "width" => s.width = parse_pt(val).unwrap_or(0.0),
+                "height" => s.height = parse_pt(val).unwrap_or(0.0),
+                "margin-left" => s.margin_left = parse_pt(val).unwrap_or(0.0),
+                "margin-top" => s.margin_top = parse_pt(val).unwrap_or(0.0),
+                "z-index" => s.behind_text = val.parse::<i64>().is_ok_and(|z| z < 0),
+                "mso-position-horizontal-relative" => {
+                    s.h_relative = match val {
+                        "page" => HRelativeFrom::Page,
+                        "margin" => HRelativeFrom::Margin,
+                        _ => HRelativeFrom::Column,
+                    };
+                }
+                "mso-position-vertical-relative" => {
+                    s.v_relative = match val {
+                        "page" => VRelativeFrom::Page,
+                        "margin" => VRelativeFrom::Margin,
+                        _ => VRelativeFrom::Paragraph,
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    s
+}
+
+fn collect_dml_points(parent: roxmltree::Node) -> Vec<(String, String)> {
+    find_dml_all(parent, "pt")
+        .map(|pt| {
+            (
+                pt.attribute("x").unwrap_or("0").to_string(),
+                pt.attribute("y").unwrap_or("0").to_string(),
+            )
+        })
+        .collect()
+}
+
+pub(super) fn find_sp_pr<'a>(wsp: roxmltree::Node<'a, 'a>) -> Option<roxmltree::Node<'a, 'a>> {
+    wsp.children()
+        .find(|n| n.has_tag_name((WPS_NS, "spPr")) || n.has_tag_name((DML_NS, "spPr")))
+}
+
+fn find_wps_style_ref<'a>(
+    wsp: roxmltree::Node<'a, 'a>,
+    ref_name: &str,
+) -> Option<roxmltree::Node<'a, 'a>> {
+    let style = find_wps(wsp, "style")?;
+    find_dml(style, ref_name)
+}
+
+pub(super) fn parse_txbx_content_paragraphs<R: Read + std::io::Seek>(
+    txbx_content: roxmltree::Node,
+    ctx: &mut ParseContext<'_, R>,
+) -> Vec<Paragraph> {
+    let mut paragraphs = Vec::new();
+    let mut lists = super::numbering::ListCounters::default();
+    // Outline levels only tag headings here; the outline itself comes from the body.
+    let opts = super::paragraph::ParagraphOptions {
+        resolve_outline_level: true,
+        ..Default::default()
+    };
+    for p in txbx_content
+        .children()
+        .filter(|n| n.has_tag_name((WML_NS, "p")))
+    {
+        let mut para = super::paragraph::build_paragraph(p, ctx, &mut lists, &opts);
+        // Auto spacing opens no story, as at the top of the body (air_pollution's
+        // Normal (Web) text box starts at its inset, not 14pt below it).
+        if paragraphs.is_empty() && para.space_before_auto {
+            para.space_before = 0.0;
+        }
+        paragraphs.push(para);
+    }
+    paragraphs
+}
+
+fn parse_gradient_fill(sp_pr: roxmltree::Node, theme: &ThemeFonts) -> Option<ShapeFill> {
+    let grad_fill = find_dml(sp_pr, "gradFill")?;
+    let gs_lst = find_dml(grad_fill, "gsLst")?;
+
+    let stops: Vec<([u8; 3], f32)> = find_dml_all(gs_lst, "gs")
+        .filter_map(|gs| {
+            let pos = frac_attr(gs, "pos").unwrap_or(0.0);
+            resolve_dml_color(gs, theme).map(|color| (color, pos))
+        })
+        .collect();
+    if stops.is_empty() {
+        return None;
+    }
+
+    // OOXML a:lin @ang is in 60,000ths of a degree
+    let angle_deg = find_dml(grad_fill, "lin")
+        .and_then(|lin| angle_attr(lin, "ang"))
+        .unwrap_or(0.0);
+
+    Some(ShapeFill::LinearGradient { stops, angle_deg })
+}
+
+fn parse_style_fill(wsp: roxmltree::Node, theme: &ThemeFonts) -> Option<ShapeFill> {
+    let fill_ref = find_wps_style_ref(wsp, "fillRef")?;
+
+    let idx = fill_ref
+        .attribute("idx")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if idx == 0 {
+        return None;
+    }
+
+    let base_color = resolve_dml_color(fill_ref, theme)?;
+
+    let fill_style_idx = (idx as usize).saturating_sub(1);
+    match theme.fill_styles.get(fill_style_idx) {
+        Some(ThemeFillStyle::Gradient { stops, angle_deg }) if !stops.is_empty() => {
+            let resolved_stops: Vec<([u8; 3], f32)> = stops
+                .iter()
+                .map(|stop| {
+                    let color = apply_color_transforms(base_color, &stop.transforms);
+                    (color, stop.position)
+                })
+                .collect();
+            Some(ShapeFill::LinearGradient {
+                stops: resolved_stops,
+                angle_deg: *angle_deg,
+            })
+        }
+        _ => Some(ShapeFill::Solid(base_color)),
+    }
+}
+
+/// Parse `a:prstGeom` or `a:custGeom` from an spPr node into `ShapeGeometry`.
+pub(super) fn parse_shape_geometry(sp_pr: roxmltree::Node) -> ShapeGeometry {
+    if let Some(prst_geom) = find_dml(sp_pr, "prstGeom") {
+        let preset = prst_geom.attribute("prst").unwrap_or("rect").to_string();
+        let adjustments = parse_avlst(prst_geom);
+        return ShapeGeometry {
+            preset: Some(preset),
+            adjustments,
+            custom: None,
+        };
+    }
+
+    if let Some(cust_geom) = find_dml(sp_pr, "custGeom")
+        && let Some(custom) = parse_custom_geometry(cust_geom)
+    {
+        return ShapeGeometry {
+            preset: None,
+            adjustments: Vec::new(),
+            custom: Some(custom),
+        };
+    }
+
+    ShapeGeometry::default()
+}
+
+pub(super) fn parse_avlst(parent: roxmltree::Node) -> Vec<(String, i64)> {
+    let Some(avlst) = find_dml(parent, "avLst") else {
+        return Vec::new();
+    };
+    find_dml_all(avlst, "gd")
+        .filter_map(|gd| {
+            let name = gd.attribute("name")?.to_string();
+            let fmla = gd.attribute("fmla")?;
+            let val = fmla.strip_prefix("val ")?.trim().parse::<i64>().ok()?;
+            Some((name, val))
+        })
+        .collect()
+}
+
+fn parse_custom_geometry(cust_geom: roxmltree::Node) -> Option<CustomGeometry> {
+    let adjust_defaults = parse_avlst(cust_geom);
+
+    let guides = find_dml(cust_geom, "gdLst")
+        .map(|gdlst| {
+            find_dml_all(gdlst, "gd")
+                .filter_map(|gd| {
+                    let name = gd.attribute("name")?.to_string();
+                    let fmla = gd.attribute("fmla")?;
+                    let parts: Vec<&str> = fmla.split_whitespace().collect();
+                    let op = FormulaOp::from_str(parts.first()?)?;
+                    let x = parts.get(1).unwrap_or(&"").to_string();
+                    let y = parts.get(2).unwrap_or(&"").to_string();
+                    let z = parts.get(3).unwrap_or(&"").to_string();
+                    Some(CustomGuideDef { name, op, x, y, z })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let paths = find_dml(cust_geom, "pathLst")
+        .map(|path_lst| {
+            find_dml_all(path_lst, "path")
+                .map(|path| {
+                    let w = path.attribute("w").and_then(|v| v.parse::<i64>().ok());
+                    let h = path.attribute("h").and_then(|v| v.parse::<i64>().ok());
+                    let fill = match path.attribute("fill") {
+                        Some("none") => PathFill::None,
+                        _ => PathFill::Norm,
+                    };
+                    let stroke = path.attribute("stroke") != Some("0");
+                    let commands = parse_path_commands(path);
+                    CustomPathDef {
+                        commands,
+                        w,
+                        h,
+                        fill,
+                        stroke,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(CustomGeometry {
+        adjust_defaults,
+        guides,
+        paths,
+    })
+}
+
+fn parse_path_commands(path: roxmltree::Node) -> Vec<CustomPathCommand> {
+    let mut commands = Vec::new();
+    for child in path
+        .children()
+        .filter(|n| n.tag_name().namespace() == Some(DML_NS))
+    {
+        match child.tag_name().name() {
+            "moveTo" => {
+                if let Some((x, y)) = dml_pt(child) {
+                    commands.push(CustomPathCommand::MoveTo { x, y });
+                }
+            }
+            "lnTo" => {
+                if let Some((x, y)) = dml_pt(child) {
+                    commands.push(CustomPathCommand::LineTo { x, y });
+                }
+            }
+            "arcTo" => {
+                commands.push(CustomPathCommand::ArcTo {
+                    wr: child.attribute("wR").unwrap_or("0").to_string(),
+                    hr: child.attribute("hR").unwrap_or("0").to_string(),
+                    st_ang: child.attribute("stAng").unwrap_or("0").to_string(),
+                    sw_ang: child.attribute("swAng").unwrap_or("0").to_string(),
+                });
+            }
+            "cubicBezTo" => {
+                let pts = collect_dml_points(child);
+                if pts.len() == 3 {
+                    commands.push(CustomPathCommand::CubicBezTo {
+                        x1: pts[0].0.clone(),
+                        y1: pts[0].1.clone(),
+                        x2: pts[1].0.clone(),
+                        y2: pts[1].1.clone(),
+                        x3: pts[2].0.clone(),
+                        y3: pts[2].1.clone(),
+                    });
+                }
+            }
+            "quadBezTo" => {
+                let pts = collect_dml_points(child);
+                if pts.len() == 2 {
+                    commands.push(CustomPathCommand::QuadBezTo {
+                        x1: pts[0].0.clone(),
+                        y1: pts[0].1.clone(),
+                        x2: pts[1].0.clone(),
+                        y2: pts[1].1.clone(),
+                    });
+                }
+            }
+            "close" => {
+                commands.push(CustomPathCommand::Close);
+            }
+            _ => {}
+        }
+    }
+    commands
+}
+
+fn dml_pt(parent: roxmltree::Node) -> Option<(String, String)> {
+    let pt = find_dml(parent, "pt")?;
+    Some((
+        pt.attribute("x").unwrap_or("0").to_string(),
+        pt.attribute("y").unwrap_or("0").to_string(),
+    ))
+}
+
+fn parse_body_margins(wsp: roxmltree::Node) -> (f32, f32, f32, f32) {
+    let Some(bp) = find_wps(wsp, "bodyPr") else {
+        return (3.6, 7.2, 3.6, 7.2); // Word defaults: 0.05" top/bottom, 0.1" left/right
+    };
+    let emu_to_pt = |attr: &str, default: f32| -> f32 { emu_attr_opt(bp, attr).unwrap_or(default) };
+    (
+        emu_to_pt("tIns", 3.6),
+        emu_to_pt("lIns", 7.2),
+        emu_to_pt("bIns", 3.6),
+        emu_to_pt("rIns", 7.2),
+    )
+}
+
+/// WordArt defaults to 0 margins unless explicitly set.
+fn parse_wordart_body_margins(wsp: roxmltree::Node) -> (f32, f32, f32, f32) {
+    let Some(bp) = find_wps(wsp, "bodyPr") else {
+        return (0.0, 0.0, 0.0, 0.0);
+    };
+    (
+        emu_attr(bp, "tIns"),
+        emu_attr(bp, "lIns"),
+        emu_attr(bp, "bIns"),
+        emu_attr(bp, "rIns"),
+    )
+}
+
+pub(super) struct WspResult {
+    pub(super) paragraphs: Vec<Paragraph>,
+    pub(super) fill: Option<ShapeFill>,
+    pub(super) shape_type: ShapeGeometry,
+    pub(super) stroke_color: Option<[u8; 3]>,
+    pub(super) stroke_width: f32,
+    pub(super) text_anchor: TextAnchor,
+    pub(super) margin_top: f32,
+    pub(super) margin_left: f32,
+    pub(super) margin_bottom: f32,
+    pub(super) margin_right: f32,
+    pub(super) no_text_wrap: bool,
+    pub(super) text_warp: Option<TextWarp>,
+    pub(super) auto_fit: AutoFit,
+}
+
+/// The shape's own properties; size, anchoring and wrapping stay at their
+/// defaults for the caller to fill in.
+impl From<WspResult> for Textbox {
+    fn from(wsp: WspResult) -> Textbox {
+        Textbox {
+            paragraphs: wsp.paragraphs,
+            fill: wsp.fill,
+            shape_type: wsp.shape_type,
+            stroke_color: wsp.stroke_color,
+            stroke_width: wsp.stroke_width,
+            text_anchor: wsp.text_anchor,
+            margin_left: wsp.margin_left,
+            margin_right: wsp.margin_right,
+            margin_top: wsp.margin_top,
+            margin_bottom: wsp.margin_bottom,
+            no_text_wrap: wsp.no_text_wrap,
+            text_warp: wsp.text_warp,
+            auto_fit: wsp.auto_fit,
+            ..Textbox::default()
+        }
+    }
+}
+
+pub(super) fn parse_textbox_from_wsp<R: Read + std::io::Seek>(
+    anchor: roxmltree::Node,
+    ctx: &mut ParseContext<'_, R>,
+) -> Option<WspResult> {
+    let wsp = anchor
+        .descendants()
+        .find(|n| n.has_tag_name((WPS_NS, "wsp")))?;
+    parse_wsp_shape(wsp, ctx)
+}
+
+/// Parse a single `wps:wsp` node into a shape result. Used both for the
+/// single-shape drawing path and for children of canvases/groups.
+pub(super) fn parse_wsp_shape<R: Read + std::io::Seek>(
+    wsp: roxmltree::Node,
+    ctx: &mut ParseContext<'_, R>,
+) -> Option<WspResult> {
+    let sp_pr = find_sp_pr(wsp);
+
+    // Line/arc presets without text are connectors — decline so the caller
+    // falls through to the connector parser, which renders flipH/flipV and
+    // arc sweep angles that the preset-geometry textbox path doesn't.
+    let prst = sp_pr
+        .and_then(|sp| find_dml(sp, "prstGeom"))
+        .and_then(|g| g.attribute("prst"));
+    if matches!(prst, Some("line" | "straightConnector1" | "arc"))
+        && find_wps(wsp, "txbx").is_none()
+    {
+        return None;
+    }
+    let has_no_fill = sp_pr.is_some_and(|sp| find_dml(sp, "noFill").is_some());
+    // Explicit a:noFill overrides any style-ref (fillRef) fill
+    let fill: Option<ShapeFill> = if has_no_fill {
+        None
+    } else {
+        sp_pr
+            .and_then(|sp| {
+                parse_solid_fill(sp, ctx.theme)
+                    .map(ShapeFill::Solid)
+                    .or_else(|| parse_gradient_fill(sp, ctx.theme))
+            })
+            .or_else(|| parse_style_fill(wsp, ctx.theme))
+    };
+
+    let ln_node = sp_pr.and_then(|sp| find_dml(sp, "ln"));
+    let ln_no_fill = ln_node.is_some_and(|ln| find_dml(ln, "noFill").is_some());
+    let explicit_ln_width = ln_node.and_then(|ln| emu_attr_opt(ln, "w"));
+    let (stroke_color, stroke_width) = if ln_no_fill {
+        (None, 0.0)
+    } else if let Some((color, width)) = ln_node.and_then(|ln| parse_line_stroke(ln, ctx.theme)) {
+        (Some(color), width)
+    } else if let Some(color) = parse_style_stroke(wsp, ctx.theme) {
+        // No explicit line color: fall back to the shape style's lnRef stroke
+        (
+            Some(color),
+            explicit_ln_width.unwrap_or_else(|| parse_style_stroke_width(wsp, ctx.theme)),
+        )
+    } else {
+        (None, 0.0)
+    };
+
+    let shape_type = sp_pr.map(parse_shape_geometry).unwrap_or_default();
+
+    let (mut margin_top, mut margin_left, mut margin_bottom, mut margin_right) =
+        parse_body_margins(wsp);
+
+    let body_pr = find_wps(wsp, "bodyPr");
+    let no_text_wrap = body_pr
+        .and_then(|bp| bp.attribute("wrap"))
+        .is_some_and(|w| w == "none");
+
+    let text_anchor = match body_pr.and_then(|bp| bp.attribute("anchor")) {
+        Some("ctr") => TextAnchor::Middle,
+        Some("b") => TextAnchor::Bottom,
+        _ => TextAnchor::Top,
+    };
+
+    let wa_props = body_pr
+        .map(super::wordart::parse_wordart_body_pr)
+        .unwrap_or(super::wordart::WordArtBodyProps {
+            is_wordart: false,
+            text_warp: None,
+            auto_fit: AutoFit::None,
+        });
+
+    // WordArt defaults to zero body margins unless explicitly set
+    if wa_props.is_wordart {
+        let (wt, wl, wb, wr) = parse_wordart_body_margins(wsp);
+        margin_top = wt;
+        margin_left = wl;
+        margin_bottom = wb;
+        margin_right = wr;
+    }
+
+    let paragraphs = find_wps(wsp, "txbx")
+        .and_then(|txbx| {
+            txbx.children()
+                .find(|n| n.has_tag_name((WML_NS, "txbxContent")))
+        })
+        .map(|tc| parse_txbx_content_paragraphs(tc, ctx))
+        .unwrap_or_default();
+
+    if paragraphs.is_empty() && (has_no_fill || fill.is_none()) && stroke_color.is_none() {
+        return None;
+    }
+
+    Some(WspResult {
+        paragraphs,
+        fill,
+        shape_type,
+        stroke_color,
+        stroke_width,
+        text_anchor,
+        margin_top,
+        margin_left,
+        margin_bottom,
+        margin_right,
+        no_text_wrap,
+        text_warp: wa_props.text_warp,
+        auto_fit: wa_props.auto_fit,
+    })
+}
+
+pub(super) fn parse_connector_from_wsp(
+    anchor: roxmltree::Node,
+    theme: &ThemeFonts,
+) -> Option<ConnectorShape> {
+    let wsp = anchor
+        .descendants()
+        .find(|n| n.has_tag_name((WPS_NS, "wsp")))?;
+
+    let (h_position, h_relative_from, v_position, v_relative_from) = parse_anchor_position(anchor);
+    let (display_w, display_h) = extent_dimensions(anchor);
+
+    let mut conn = parse_connector_shape_node(wsp, theme)?;
+    conn.h_position = h_position;
+    conn.h_relative_from = h_relative_from;
+    conn.v_position = v_position;
+    conn.v_relative_from = v_relative_from;
+    conn.width = display_w;
+    conn.height = display_h;
+    (conn.behind_doc, conn.z_index) = super::images::anchor_z_order(anchor);
+    Some(conn)
+}
+
+/// Parse a `wps:wsp` connector node (line/arc preset) into a ConnectorShape
+/// with zeroed position/size — the caller supplies the placement.
+pub(super) fn parse_connector_shape_node(
+    wsp: roxmltree::Node,
+    theme: &ThemeFonts,
+) -> Option<ConnectorShape> {
+    let sp_pr = find_sp_pr(wsp)?;
+    let prst_geom = find_dml(sp_pr, "prstGeom")?;
+    let prst = prst_geom.attribute("prst")?;
+
+    let xfrm = find_dml(sp_pr, "xfrm");
+
+    let connector_type = match prst {
+        "line" | "straightConnector1" => {
+            let flip_h = xfrm
+                .and_then(|x| x.attribute("flipH"))
+                .is_some_and(|v| v == "1");
+            let flip_v = xfrm
+                .and_then(|x| x.attribute("flipV"))
+                .is_some_and(|v| v == "1");
+            ConnectorType::Line { flip_h, flip_v }
+        }
+        "arc" => {
+            let rotation = xfrm.and_then(|x| angle_attr(x, "rot")).unwrap_or(0.0);
+
+            let mut adj1 = 0.0_f32;
+            let mut adj2 = 0.0_f32;
+            for gd in prst_geom
+                .descendants()
+                .filter(|n| n.has_tag_name((DML_NS, "gd")))
+            {
+                let name = gd.attribute("name").unwrap_or("");
+                let val = gd
+                    .attribute("fmla")
+                    .and_then(|f| f.strip_prefix("val "))
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(0.0)
+                    / 60000.0;
+                match name {
+                    "adj1" => adj1 = val,
+                    "adj2" => adj2 = val,
+                    _ => {}
+                }
+            }
+            ConnectorType::Arc {
+                start_angle: adj1,
+                end_angle: adj2,
+                rotation,
+            }
+        }
+        _ => return None,
+    };
+
+    let ln_node = find_dml(sp_pr, "ln");
+    // Explicit a:ln formatting overrides the style matrix lnRef (OOXML precedence).
+    // The 50cm connector sets a:ln/solidFill=tx1 (black) but lnRef=accent1 (blue);
+    // Word draws it black, so the direct fill must win over the style ref.
+    let stroke_color = ln_node
+        .and_then(|ln| parse_solid_fill(ln, theme))
+        .or_else(|| parse_style_stroke(wsp, theme))
+        .unwrap_or([0, 0, 0]);
+    let stroke_width = ln_node
+        .and_then(|ln| emu_attr_opt(ln, "w"))
+        .unwrap_or_else(|| parse_style_stroke_width(wsp, theme));
+
+    let (head_end, tail_end) = ln_node
+        .map(|ln| {
+            let head = find_dml(ln, "headEnd")
+                .and_then(|n| n.attribute("type"))
+                .map(ArrowEnd::from_attr)
+                .unwrap_or_default();
+            let tail = find_dml(ln, "tailEnd")
+                .and_then(|n| n.attribute("type"))
+                .map(ArrowEnd::from_attr)
+                .unwrap_or_default();
+            (head, tail)
+        })
+        .unwrap_or_default();
+
+    Some(ConnectorShape {
+        behind_doc: false,
+        h_position: HorizontalPosition::Offset(0.0),
+        h_relative_from: HRelativeFrom::Column,
+        v_position: VerticalPosition::Offset(0.0),
+        v_relative_from: VRelativeFrom::Paragraph,
+        width: 0.0,
+        height: 0.0,
+        stroke_color,
+        stroke_width,
+        connector_type,
+        head_end,
+        tail_end,
+        z_index: 0,
+    })
+}
+
+fn parse_style_stroke(wsp: roxmltree::Node, theme: &ThemeFonts) -> Option<[u8; 3]> {
+    let ln_ref = find_wps_style_ref(wsp, "lnRef")?;
+    let idx = ln_ref
+        .attribute("idx")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if idx == 0 {
+        return None;
+    }
+    resolve_dml_color(ln_ref, theme)
+}
+
+/// The width of the theme line style a shape's lnRef picks (indonesian's
+/// "Format 12" box: idx 2 of 9525/25400/38100 EMU is Word's 2pt outline).
+fn parse_style_stroke_width(wsp: roxmltree::Node, theme: &ThemeFonts) -> f32 {
+    let idx = find_wps_style_ref(wsp, "lnRef")
+        .and_then(|lr| lr.attribute("idx"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    if let Some(&w) = idx.checked_sub(1).and_then(|i| theme.line_widths.get(i)) {
+        return w;
+    }
+    match idx {
+        0 => 0.0,
+        1 => 0.75,
+        2 => 1.5,
+        3 => 2.25,
+        _ => 1.0,
+    }
+}
+
+/// Parse a VML color value: `#RRGGBB`, a named color, or a theme token like
+/// `white [3212]` (the `[idx]` suffix is the resolved theme color we ignore in
+/// favor of the spelled-out name). Returns None for unrecognized values so the
+/// caller can fall back to a default.
+fn parse_vml_color(val: &str) -> Option<[u8; 3]> {
+    let val = val.trim().split('[').next().unwrap_or("").trim();
+    if let Some(hex) = val.strip_prefix('#') {
+        if hex.len() == 6 {
+            return super::parse_hex_color(hex);
+        }
+        if hex.len() == 3 {
+            let expand = |c: &str| u8::from_str_radix(&c.repeat(2), 16).ok();
+            return Some([
+                expand(&hex[0..1])?,
+                expand(&hex[1..2])?,
+                expand(&hex[2..3])?,
+            ]);
+        }
+        return None;
+    }
+    match val.to_ascii_lowercase().as_str() {
+        "black" => Some([0, 0, 0]),
+        "white" => Some([255, 255, 255]),
+        "red" => Some([255, 0, 0]),
+        "green" => Some([0, 128, 0]),
+        "blue" => Some([0, 0, 255]),
+        "yellow" => Some([255, 255, 0]),
+        "gray" | "grey" => Some([128, 128, 128]),
+        "silver" => Some([192, 192, 192]),
+        _ => None,
+    }
+}
+
+/// Map a VML shape type code (`o:spt`, also encoded as the `t<N>` suffix of a
+/// shapetype id like `#_x0000_t87`) to a DrawingML preset geometry name for the
+/// stroke-only shapes we can render. Only the brace/bracket family is mapped —
+/// these are the common stroke-only VML presets that carry no textbox.
+fn vml_spt_to_preset(spt: u32) -> Option<&'static str> {
+    match spt {
+        85 => Some("leftBracket"),
+        86 => Some("rightBracket"),
+        87 => Some("leftBrace"),
+        88 => Some("rightBrace"),
+        _ => None,
+    }
+}
+
+/// Resolve a VML shape's preset geometry from its `o:spt` attribute or its
+/// `type="#_x0000_t<N>"` reference.
+fn vml_shape_preset(shape: roxmltree::Node) -> Option<&'static str> {
+    let spt = shape
+        .attribute((OFFICE_NS, "spt"))
+        .and_then(|v| v.trim().parse::<f64>().ok().map(|f| f as u32))
+        .or_else(|| {
+            shape
+                .attribute("type")
+                .and_then(|t| t.rsplit_once('t'))
+                .and_then(|(_, n)| n.parse::<u32>().ok())
+        })?;
+    vml_spt_to_preset(spt)
+}
+
+/// Build a paragraph-less stroked textbox for a VML preset shape that has no
+/// textbox/textpath (e.g. a curly brace). Returns None for unrecognized presets
+/// so such shapes remain dropped rather than rendered as a stray rectangle.
+fn parse_vml_geometry_shape(shape: roxmltree::Node) -> Option<Textbox> {
+    // A plain v:rect / v:oval / v:roundrect names its geometry by element.
+    let element_preset = match shape.tag_name().name() {
+        "rect" => Some("rect"),
+        "roundrect" => Some("roundRect"),
+        "oval" => Some("ellipse"),
+        _ => None,
+    };
+    let spt_preset = vml_shape_preset(shape);
+    let preset = spt_preset.or(element_preset)?;
+
+    // VML fills white by default; only a written fillcolor is drawn
+    // (ponytail: the implicit white fill would cover text we place behind).
+    // A page-wide v:rect filled #2c3e50 behind a book cover's white title.
+    let fill = (!matches!(shape.attribute("filled"), Some("f") | Some("false")))
+        .then(|| shape.attribute("fillcolor").and_then(parse_vml_color))
+        .flatten()
+        .map(ShapeFill::Solid);
+    // A shape named only by its element draws the default black outline
+    // only when the stroke is written out, like the fill.
+    let stroked = !matches!(shape.attribute("stroked"), Some("f") | Some("false"))
+        && (spt_preset.is_some()
+            || shape.attribute("stroked").is_some()
+            || shape.attribute("strokecolor").is_some());
+    if !stroked && fill.is_none() {
+        return None;
+    }
+    let stroke_width = shape
+        .attribute("strokeweight")
+        .and_then(parse_pt)
+        .filter(|w| *w > 0.0)
+        .unwrap_or(0.75);
+    let stroke_color = shape
+        .attribute("strokecolor")
+        .and_then(parse_vml_color)
+        .unwrap_or([0, 0, 0]);
+
+    let VmlBoxStyle {
+        width,
+        height,
+        margin_left,
+        margin_top,
+        h_relative,
+        v_relative,
+        behind_text,
+    } = parse_vml_box_style(shape.attribute("style").unwrap_or(""));
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+
+    Some(Textbox {
+        width_pt: width,
+        height_pt: height,
+        h_position: HorizontalPosition::Offset(margin_left),
+        h_relative_from: h_relative,
+        v_offset_pt: margin_top,
+        v_position: VerticalPosition::Offset(margin_top),
+        v_relative_from: v_relative,
+        shape_type: ShapeGeometry {
+            preset: Some(preset.to_string()),
+            adjustments: Vec::new(),
+            custom: None,
+        },
+        stroke_color: stroked.then_some(stroke_color),
+        stroke_width,
+        fill,
+        behind_doc: behind_text,
+        no_text_wrap: true,
+        ..Textbox::default()
+    })
+}
+
+/// VML textboxes have an opaque white solid fill unless explicitly disabled.
+fn parse_vml_textbox_fill(shape: roxmltree::Node) -> Option<ShapeFill> {
+    let fill = shape.children().find(|n| n.has_tag_name((VML_NS, "fill")));
+    if matches!(shape.attribute("filled"), Some("f" | "false" | "0"))
+        || fill.is_some_and(|n| matches!(n.attribute("on"), Some("f" | "false" | "0")))
+    {
+        return None;
+    }
+    // Other VML fill types need their own renderer, not an opaque approximation.
+    if fill.is_some_and(|n| n.attribute("type").is_some_and(|t| t != "solid")) {
+        return None;
+    }
+    let color = shape.attribute("fillcolor")
+        .or_else(|| fill.and_then(|n| n.attribute("color")))
+        .and_then(parse_vml_color).unwrap_or([255, 255, 255]);
+    Some(ShapeFill::Solid(color))
+}
+
+pub(super) fn parse_textbox_from_vml<R: Read + std::io::Seek>(
+    pict_node: roxmltree::Node,
+    ctx: &mut ParseContext<'_, R>,
+) -> Option<Textbox> {
+    let shape = pict_node.children().find(|n| {
+        n.tag_name().namespace() == Some(VML_NS) && matches!(n.tag_name().name(), "shape" | "rect")
+    })?;
+
+    // VML WordArt uses v:textpath instead of v:textbox
+    let Some(textbox_node) = shape
+        .children()
+        .find(|n| n.has_tag_name((VML_NS, "textbox")))
+    else {
+        if let Some(tp) = shape
+            .children()
+            .find(|n| n.has_tag_name((VML_NS, "textpath")))
+        {
+            return super::wordart::parse_vml_wordart(shape, tp, ctx.styles, ctx.theme);
+        }
+        // Stroke-only VML preset shapes (e.g. a curly brace, o:spt 87) have
+        // neither a textbox nor a textpath. They were previously dropped
+        // entirely (annotation #174 — the blue "{" wrapping the paragraphs).
+        // Build a paragraph-less stroked shape from the preset geometry.
+        return parse_vml_geometry_shape(shape);
+    };
+    let txbx_content = textbox_node
+        .children()
+        .find(|n| n.has_tag_name((WML_NS, "txbxContent")))?;
+
+    let style_str = shape.attribute("style").unwrap_or("");
+    let VmlBoxStyle {
+        width,
+        height,
+        margin_left,
+        margin_top,
+        h_relative,
+        v_relative,
+        ..
+    } = parse_vml_box_style(style_str);
+
+    // VML shapes are stroked by default (black, 0.75pt) unless stroked="f".
+    // Word renders this border, so honor it — previously every VML textbox was
+    // forced borderless, dropping e.g. the "Nota Bene" box outline.
+    let stroked = !matches!(shape.attribute("stroked"), Some("f") | Some("false"));
+    let (stroke_color, stroke_width) = if stroked {
+        let w = shape
+            .attribute("strokeweight")
+            .and_then(parse_pt)
+            .filter(|w| *w > 0.0)
+            .unwrap_or(0.75);
+        let c = shape
+            .attribute("strokecolor")
+            .and_then(parse_vml_color)
+            .unwrap_or([0, 0, 0]);
+        (Some(c), w)
+    } else {
+        (None, 0.0)
+    };
+
+    let paragraphs = parse_txbx_content_paragraphs(txbx_content, ctx);
+    if paragraphs.is_empty() {
+        return None;
+    }
+    Some(Textbox {
+        paragraphs,
+        width_pt: width,
+        height_pt: height,
+        h_position: HorizontalPosition::Offset(margin_left),
+        h_relative_from: h_relative,
+        v_offset_pt: margin_top,
+        v_position: VerticalPosition::Offset(margin_top),
+        v_relative_from: v_relative,
+        stroke_color,
+        stroke_width,
+        behind_doc: style_str.split(';').filter_map(|part| part.trim().split_once(':'))
+            .any(|(key, value)| key.trim() == "z-index"
+                && value.trim().parse::<i64>().is_ok_and(|z| z < 0)),
+        fill: parse_vml_textbox_fill(shape),
+        margin_left: 7.2,
+        margin_right: 7.2,
+        margin_top: 3.6,
+        margin_bottom: 3.6,
+        ..Textbox::default()
+    })
+}
+
+pub(super) fn collect_textboxes_from_paragraph<R: Read + std::io::Seek>(
+    para_node: roxmltree::Node,
+    ctx: &mut ParseContext<'_, R>,
+) -> Vec<Textbox> {
+    let mut textboxes = Vec::new();
+
+    for child in para_node.children() {
+        let ns = child.tag_name().namespace();
+        let name = child.tag_name().name();
+        if ns == Some(MC_NS_TOP) && name == "AlternateContent" {
+            let choice = child
+                .children()
+                .find(|n| n.has_tag_name((MC_NS_TOP, "Choice")));
+            let fallback = child
+                .children()
+                .find(|n| n.has_tag_name((MC_NS_TOP, "Fallback")));
+
+            if let Some(branch) = choice {
+                for drawing in branch
+                    .children()
+                    .filter(|n| n.has_tag_name((WML_NS, "drawing")))
+                {
+                    for container in drawing
+                        .children()
+                        .filter(|n| n.has_tag_name((WPD_NS, "anchor")))
+                    {
+                        let (display_w, display_h) = extent_dimensions(container);
+
+                        if let Some(wsp) = parse_textbox_from_wsp(container, ctx) {
+                            let (h_position, h_relative, v_pos, v_relative) =
+                                parse_anchor_position(container);
+                            let (wrap_type, wrap_text, _) =
+                                super::images::parse_wrap_type(container);
+                            let (behind_doc, z_index) = super::images::anchor_z_order(container);
+                            let (_, dist_bottom) = super::images::wrap_dist_top_bottom(container);
+                            textboxes.push(Textbox {
+                                width_pt: display_w,
+                                height_pt: display_h,
+                                h_position,
+                                h_relative_from: h_relative,
+                                v_offset_pt: v_pos.offset_or_zero(),
+                                v_position: v_pos,
+                                v_relative_from: v_relative,
+                                wrap_type,
+                                wrap_text,
+                                dist_bottom,
+                                behind_doc,
+                                z_index,
+                                ..Textbox::from(wsp)
+                            });
+                        }
+                    }
+                }
+            } else if let Some(branch) = fallback {
+                for pict in branch
+                    .children()
+                    .filter(|n| n.has_tag_name((WML_NS, "pict")))
+                {
+                    if let Some(tb) = parse_textbox_from_vml(pict, ctx) {
+                        textboxes.push(tb);
+                    }
+                }
+                for r in branch.children().filter(|n| n.has_tag_name((WML_NS, "r"))) {
+                    for pict in r.children().filter(|n| n.has_tag_name((WML_NS, "pict"))) {
+                        if let Some(tb) = parse_textbox_from_vml(pict, ctx) {
+                            textboxes.push(tb);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    textboxes
+}
+
+#[cfg(test)]
+mod connector_layer_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_textbox_fill_is_white_unless_disabled_or_colored() {
+        for (attrs, child, expected) in [
+            ("", "", Some([255, 255, 255])),
+            ("filled=\"f\"", "", None),
+            ("", "<v:fill on=\"false\"/>", None),
+            ("fillcolor=\"#fff080\"", "", Some([255, 240, 128])),
+            ("", "<v:fill type=\"gradient\"/>", None),
+        ] {
+            let xml = format!(r#"<v:shape xmlns:v="{VML_NS}" {attrs}>{child}</v:shape>"#);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let actual = match parse_vml_textbox_fill(doc.root_element()) {
+                Some(ShapeFill::Solid(color)) => Some(color),
+                None => None,
+                _ => panic!("expected a solid fill"),
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    use std::collections::HashMap;
+
+
+
+    #[test]
+    fn anchored_connector_preserves_behind_document_layer() {
+        let theme = ThemeFonts::default();
+        for (attr, expected) in [("", false), ("0", false), ("1", true), ("true", true)] {
+            let xml = format!(
+                r#"<wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" behindDoc="{attr}" relativeHeight="42"><wp:extent cx="914400" cy="0"/><wps:wsp><wps:spPr><a:prstGeom prst="straightConnector1"/></wps:spPr></wps:wsp></wp:anchor>"#
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let connector = parse_connector_from_wsp(doc.root_element(), &theme).unwrap();
+            assert_eq!(connector.behind_doc, expected);
+            assert_eq!(connector.z_index, 42);
+        }
+    }
+}
