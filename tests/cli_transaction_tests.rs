@@ -567,3 +567,68 @@ fn test_case_14_font_path_overrides_preset_env() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_case_15_chinese_docx_cli_default_embedded_font() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case15");
+    let input = dir.join("cjk_doc.docx");
+    let out_pdf = dir.join("cjk_out.pdf");
+    let report_json = dir.join("cjk_report.json");
+
+    fs::write(&input, make_test_docx("中文文档命令行离线转换测试。")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("-o")
+        .arg(&out_pdf)
+        .arg("--report-json")
+        .arg(&report_json)
+        .env_remove("DOCXIDE_FONTS")
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(0), "CLI conversion with default embedded font must succeed");
+    assert!(out_pdf.exists(), "Output PDF must exist");
+    let pdf_bytes = fs::read(&out_pdf).unwrap();
+    assert!(pdf_bytes.starts_with(b"%PDF-"), "Output PDF must have valid header");
+    assert!(pdf_bytes.len() > 100, "Output PDF must not be truncated");
+
+    assert!(report_json.exists(), "JSON report must exist");
+    let rep_content = fs::read_to_string(&report_json).unwrap();
+    assert!(rep_content.contains("\"conversion_status\": \"success_with_warnings\""));
+    assert!(rep_content.contains("\"fallback_used\": true"));
+
+    // Stderr should contain diagnostic warning
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr_str.contains("font.fallback"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_16_chinese_docx_unsupported_glyph_fails_fast_exit_3() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case16");
+    let input = dir.join("cjk_unsupported.docx");
+    let out_pdf = dir.join("cjk_unsupported_out.pdf");
+
+    let unmapped_char = '\u{2A6D0}';
+    fs::write(&input, make_test_docx(&format!("包含生僻字{}测试", unmapped_char))).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("-o")
+        .arg(&out_pdf)
+        .env_remove("DOCXIDE_FONTS")
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(3), "Missing font glyph must fail fast with exit code 3");
+    assert!(!out_pdf.exists(), "Output PDF must not be committed on fail-fast error");
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr_str.contains("Font diagnostic failure"));
+
+    let _ = fs::remove_dir_all(&dir);
+}

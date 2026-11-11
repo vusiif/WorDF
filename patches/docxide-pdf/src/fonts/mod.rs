@@ -12,6 +12,7 @@ use pdf_writer::{Name, Pdf, Ref};
 use crate::model::{FontFamily, FontTable, Run};
 
 pub(crate) use encoding::{encode_as_gids, to_winansi_bytes};
+pub use discovery::register_default_embedded_font;
 
 /// Metrics extracted from a font file during embedding. Does not include font resolution
 /// metadata (path, face index, synthetic bold) which is tracked separately.
@@ -307,7 +308,26 @@ fn try_font(
     }
 
     let (path, face_index, face_bold, face_italic) =
-        discovery::find_font_file(candidate, bold, italic)?;
+        match discovery::find_font_file(candidate, bold, italic) {
+            Some(res) => res,
+            None => {
+                if let Some((names, data)) = discovery::get_default_embedded_font() {
+                    let cand_lower = candidate.to_lowercase();
+                    if names.iter().any(|n| n.to_lowercase() == cand_lower) {
+                        if let Some(metrics) = embed(data, 0) {
+                            return Some(ResolvedFont {
+                                metrics,
+                                synthetic_bold: bold,
+                                synthetic_italic: italic,
+                                font_path: None,
+                                face_index: 0,
+                            });
+                        }
+                    }
+                }
+                return None;
+            }
+        };
     let data = std::fs::read(&path).ok()?;
     let metrics = embed(&data, face_index)?;
     Some(ResolvedFont {
@@ -598,6 +618,8 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
         (SimplifiedChinese, true) => &[
             "SimSun",
             "Microsoft YaHei",
+            "LXGW WenKai Lite",
+            "霞鹜文楷 轻便版",
             "Songti SC",
             "PingFang SC",
             "Hiragino Sans GB W3",
@@ -608,6 +630,8 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
         (SimplifiedChinese, false) => &[
             "Microsoft YaHei",
             "SimSun",
+            "LXGW WenKai Lite",
+            "霞鹜文楷 轻便版",
             "PingFang SC",
             "Hiragino Sans GB W3",
             "Songti SC",
@@ -618,6 +642,8 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
             "PMingLiU",
             "MingLiU",
             "Microsoft JhengHei",
+            "LXGW WenKai Lite",
+            "霞鹜文楷 轻便版",
             "Songti TC",
             "PingFang TC",
             "Noto Serif CJK TC",
@@ -630,6 +656,8 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
         (TraditionalChinese, false) => &[
             "Microsoft YaHei",
             "Microsoft JhengHei",
+            "LXGW WenKai Lite",
+            "霞鹜文楷 轻便版",
             "PMingLiU",
             "MingLiU",
             "PingFang TC",
@@ -643,6 +671,8 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
         (Unknown, true) => &[
             "MS Mincho",
             "SimSun",
+            "LXGW WenKai Lite",
+            "霞鹜文楷 轻便版",
             "PMingLiU",
             "Batang",
             "Songti SC",
@@ -653,6 +683,8 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
         ],
         (Unknown, false) => &[
             "Microsoft YaHei",
+            "LXGW WenKai Lite",
+            "霞鹜文楷 轻便版",
             "MS Gothic",
             "Malgun Gothic",
             "PMingLiU",
@@ -666,16 +698,30 @@ fn cjk_fallback_fonts(script: CjkScript, serif: bool) -> &'static [&'static str]
 
 /// How many of `chars` the named font has glyphs for; 0 when it is not installed.
 fn glyph_coverage(name: &str, chars: &HashSet<char>) -> usize {
-    let Some((path, face_index, ..)) = discovery::find_font_file(name, false, false) else {
-        return 0;
-    };
-    discovery::probe_face(&path, face_index, |face| {
-        chars
-            .iter()
-            .filter(|&&c| face.glyph_index(c).is_some())
-            .count()
-    })
-    .unwrap_or(0)
+    if let Some((path, face_index, ..)) = discovery::find_font_file(name, false, false) {
+        if let Some(cov) = discovery::probe_face(&path, face_index, |face| {
+            chars
+                .iter()
+                .filter(|&&c| face.glyph_index(c).is_some())
+                .count()
+        }) {
+            return cov;
+        }
+    }
+
+    if let Some((names, data)) = discovery::get_default_embedded_font() {
+        let name_lower = name.to_lowercase();
+        if names.iter().any(|n| n.to_lowercase() == name_lower) {
+            if let Ok(face) = ttf_parser::Face::parse(data, 0) {
+                return chars
+                    .iter()
+                    .filter(|&&c| face.glyph_index(c).is_some())
+                    .count();
+            }
+        }
+    }
+
+    0
 }
 
 /// Font for characters the resolved fonts lack, shared by the whole document

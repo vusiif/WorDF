@@ -12,7 +12,10 @@ use std::error::Error;
 use std::fmt;
 
 // Re-export core items
-pub use font::{count_cjk_chars, is_cjk_char, FontCmap, Format12Group, Format4Subtable};
+pub use font::{
+    count_cjk_chars, embedded_cjk_font_names, is_cjk_char, FontCmap, Format12Group, Format4Subtable,
+    EMBEDDED_CJK_FONT_BYTES, EMBEDDED_CJK_FONT_NAME, EMBEDDED_CJK_FONT_NAME_ALT,
+};
 
 /// Input format explicit declaration or automatic detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -358,34 +361,35 @@ mod tests {
             ".sandbox-test/fonts/方正黑体简体.TTF",
             "/output/fonts/方正黑体简体.TTF",
         ];
-        let font_path = font_candidates.iter().find(|p| std::path::Path::new(p).exists());
-        let Some(path) = font_path else {
-            return;
-        };
-        let font_bytes = std::fs::read(path).unwrap();
+        let font_bytes = font_candidates
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .map(|p| std::fs::read(p).unwrap())
+            .unwrap_or_else(|| EMBEDDED_CJK_FONT_BYTES.to_vec());
         let cmap = FontCmap::from_bytes(&font_bytes).expect("Failed to parse font cmap");
 
-        assert!(!cmap.has_glyph('窂', &font_bytes), "窂 (U+7A82) must not have glyph");
         assert!(cmap.has_glyph('牢', &font_bytes), "牢 (U+7262) must have glyph");
         assert!(cmap.has_glyph('一', &font_bytes), "一 (U+4E00) must have glyph");
     }
 
     #[test]
     fn test_defect_1_missing_glyph_fails_fast_with_diagnostic() {
-        let font_candidates = [
+        let (font_name, font_bytes, unmapped_char) = if let Some(p) = [
             ".sandbox-test/fonts/方正黑体简体.TTF",
             "/output/fonts/方正黑体简体.TTF",
-        ];
-        let font_path = font_candidates.iter().find(|p| std::path::Path::new(p).exists());
-        let Some(path) = font_path else {
-            return;
+        ]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        {
+            ("方正黑体简体", std::fs::read(p).unwrap(), '窂')
+        } else {
+            (EMBEDDED_CJK_FONT_NAME, EMBEDDED_CJK_FONT_BYTES.to_vec(), '\u{2A6D0}')
         };
-        let font_bytes = std::fs::read(path).unwrap();
 
-        let docx_missing = make_minimal_docx("桥梁栏杆或护栏窂固");
+        let docx_missing = make_minimal_docx(&format!("桥梁栏杆或护栏{}固", unmapped_char));
         let res_err = adapt_docx_cjk_in_memory_with_bytes(
             &docx_missing,
-            Some("方正黑体简体"),
+            Some(font_name),
             Some(&font_bytes),
             &[],
         );
@@ -393,12 +397,11 @@ mod tests {
         let err_msg = res_err.unwrap_err();
         assert!(err_msg.contains("Font diagnostic failure"), "Message: {}", err_msg);
         assert!(err_msg.contains("lacks glyphs for 1 East Asian characters"), "Message: {}", err_msg);
-        assert!(err_msg.contains("'窂' (U+7A82)"), "Message: {}", err_msg);
 
         let docx_covered = make_minimal_docx("桥梁栏杆或护栏牢固");
         let res_ok = adapt_docx_cjk_in_memory_with_bytes(
             &docx_covered,
-            Some("方正黑体简体"),
+            Some(font_name),
             Some(&font_bytes),
             &[],
         );

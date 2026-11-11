@@ -3,6 +3,23 @@
 
 use std::path::{Path, PathBuf};
 
+/// Built-in fallback font file bytes (LXGW WenKai Lite Regular v1.530).
+pub const EMBEDDED_CJK_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/LXGWWenKaiLite-Regular.ttf");
+
+/// Built-in fallback font primary family name.
+pub const EMBEDDED_CJK_FONT_NAME: &str = "LXGW WenKai Lite";
+
+/// Built-in fallback font localized / Chinese family name.
+pub const EMBEDDED_CJK_FONT_NAME_ALT: &str = "霞鹜文楷 轻便版";
+
+/// Return list of recognized names for the embedded CJK font.
+pub fn embedded_cjk_font_names() -> Vec<String> {
+    vec![
+        EMBEDDED_CJK_FONT_NAME.to_string(),
+        EMBEDDED_CJK_FONT_NAME_ALT.to_string(),
+    ]
+}
+
 /// Check if a character belongs to East Asian / CJK Unicode ranges.
 pub fn is_cjk_char(ch: char) -> bool {
     matches!(ch,

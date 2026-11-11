@@ -222,3 +222,64 @@ fn test_consumer_reject_garbage_zip_corrupt_input() {
         "Corrupted/unparseable ZIP archive must maintain CorruptInput (exit code 5)"
     );
 }
+
+#[test]
+fn test_consumer_convert_chinese_docx_with_default_embedded_font() {
+    let docx = make_test_docx("你好世界，独立离线中文字体方案测试。");
+    // Completely default options: no fallback font name specified, no system font path.
+    let options = ConversionOptions::default();
+
+    let result = convert(&docx, &options).expect("Conversion of CJK DOCX with default embedded font must succeed");
+
+    assert!(!result.pdf.is_empty(), "PDF bytes must not be empty");
+    assert!(result.pdf.starts_with(b"%PDF-"), "PDF must start with %PDF- header");
+    assert!(result.page_count >= 1, "Real page count must be >= 1, got {}", result.page_count);
+
+    // Verify diagnostic warning was emitted for CJK fallback mapping to the embedded font
+    let has_font_fallback = result.warnings.iter().any(|w| {
+        w.code == "font.fallback" && w.message.contains(wordf::EMBEDDED_CJK_FONT_NAME)
+    });
+    assert!(
+        has_font_fallback,
+        "Warnings must contain font.fallback diagnostic referencing '{}', got: {:?}",
+        wordf::EMBEDDED_CJK_FONT_NAME,
+        result.warnings
+    );
+}
+
+#[test]
+fn test_consumer_embedded_font_cmap_coverage_and_fail_fast() {
+    let font_bytes = wordf::EMBEDDED_CJK_FONT_BYTES;
+    assert!(!font_bytes.is_empty(), "Embedded font bytes must not be empty");
+
+    let cmap = wordf::FontCmap::from_bytes(font_bytes).expect("Embedded font cmap parsing must succeed");
+
+    // Standard characters must be covered
+    let common_chars = ['你', '好', '世', '界', '中', '文', '测', '试', '牢', '一', '桥', '梁', '栏', '杆', '固'];
+    for &ch in &common_chars {
+        assert!(cmap.has_glyph(ch, font_bytes), "Embedded font must have glyph for '{}' (U+{:04X})", ch, ch as u32);
+    }
+
+    // A character outside the font's coverage must fail fast during DOCX conversion
+    let unmapped_char = '\u{2A6D0}';
+    assert!(!cmap.has_glyph(unmapped_char, font_bytes));
+
+    let docx_unmapped = make_test_docx(&format!("正常文本与生僻字{}", unmapped_char));
+    let options = ConversionOptions::default();
+
+    let err = convert(&docx_unmapped, &options).expect_err("Unmapped CJK character must fail fast with MissingFont");
+    assert_eq!(err.kind, ConversionErrorKind::MissingFont);
+    assert!(err.message.contains("Font diagnostic failure"), "Message: {}", err.message);
+}
+
+#[test]
+fn test_consumer_embedded_font_family_names() {
+    let font_bytes = wordf::EMBEDDED_CJK_FONT_BYTES;
+    let names = wordf::font::extract_font_family_names(font_bytes);
+    assert!(
+        names.contains(&wordf::EMBEDDED_CJK_FONT_NAME.to_string()),
+        "Extracted names {:?} must contain '{}'",
+        names,
+        wordf::EMBEDDED_CJK_FONT_NAME
+    );
+}

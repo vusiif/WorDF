@@ -7,6 +7,7 @@ mod model;
 mod pdf;
 
 pub use error::Error;
+pub use fonts::register_default_embedded_font;
 
 use std::path::Path;
 use std::time::Instant;

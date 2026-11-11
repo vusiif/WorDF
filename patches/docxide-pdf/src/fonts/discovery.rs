@@ -16,6 +16,16 @@ static FONT_INDEX: OnceLock<FontLookup> = OnceLock::new();
 /// Lowercase families that only Mac Roman–named macOS system faces provide.
 static MAC_ONLY_FAMILIES: OnceLock<HashSet<String>> = OnceLock::new();
 
+static DEFAULT_EMBEDDED_FONT: OnceLock<(Vec<String>, &'static [u8])> = OnceLock::new();
+
+pub fn register_default_embedded_font(names: Vec<String>, data: &'static [u8]) {
+    let _ = DEFAULT_EMBEDDED_FONT.set((names, data));
+}
+
+pub(super) fn get_default_embedded_font() -> Option<&'static (Vec<String>, &'static [u8])> {
+    DEFAULT_EMBEDDED_FONT.get()
+}
+
 /// Return all localized family names for a font face (deduplicated by lowercase),
 /// and whether they came only from Mac Roman records: macOS system faces such as
 /// Helvetica, Times, Courier, Optima and Apple's Symbol carry no Unicode family

@@ -35,14 +35,31 @@ pub fn convert_docx_route_c(
     bytes: &[u8],
     options: &ConversionOptions,
 ) -> Result<ConversionOutput, ConversionError> {
-    let fallback_name = options.fallback_font_name.as_deref();
-    let fallback_bytes = options.fallback_font_bytes.as_deref();
+    docxide_pdf::register_default_embedded_font(
+        crate::font::embedded_cjk_font_names(),
+        crate::font::EMBEDDED_CJK_FONT_BYTES,
+    );
+
+    let (fallback_name, fallback_bytes) = match options.fallback_font_name.as_deref() {
+        Some(name) => (name, options.fallback_font_bytes.as_deref()),
+        None => (
+            crate::font::EMBEDDED_CJK_FONT_NAME,
+            Some(crate::font::EMBEDDED_CJK_FONT_BYTES),
+        ),
+    };
+
+    let mut available_fonts = options.available_font_names.clone();
+    for name in crate::font::embedded_cjk_font_names() {
+        if !available_fonts.contains(&name) {
+            available_fonts.push(name);
+        }
+    }
 
     let (adapted_docx, cjk_count) = adapt_docx_cjk_in_memory_with_bytes(
         bytes,
-        fallback_name,
+        Some(fallback_name),
         fallback_bytes,
-        &options.available_font_names,
+        &available_fonts,
     )?;
 
     let (pdf_bytes, raw_page_count) =
@@ -74,15 +91,13 @@ pub fn convert_docx_route_c(
 
     let mut warnings = Vec::new();
     if cjk_count > 0 {
-        if let Some(fb) = fallback_name {
-            warnings.push(Diagnostic {
-                code: "font.fallback".to_string(),
-                message: format!(
-                    "Generic CJK fallback active: {} characters mapped to '{}'",
-                    cjk_count, fb
-                ),
-            });
-        }
+        warnings.push(Diagnostic {
+            code: "font.fallback".to_string(),
+            message: format!(
+                "Generic CJK fallback active: {} characters mapped to '{}'",
+                cjk_count, fallback_name
+            ),
+        });
     }
 
     Ok(ConversionOutput {

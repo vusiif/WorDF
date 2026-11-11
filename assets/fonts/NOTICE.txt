@@ -1,0 +1,17 @@
+LXGW WenKai Lite (霞鹜文楷 轻便版)
+=====================================
+Version: v1.530 (2026-10-18)
+Author: LXGW (https://github.com/lxgw)
+Upstream Font: Klee One (The Klee Project Authors, https://github.com/fontworks-fonts/Klee)
+Source URL: https://github.com/lxgw/LxgwWenKai-Lite/releases/tag/v1.530
+Direct Download: https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.530/LXGWWenKaiLite-Regular.ttf
+SHA256: f799a538a3355877e597a0ae04050e897932c9ae7689eb9227c2953c5dd549ea
+File Size: 13,949,472 bytes
+License: SIL Open Font License 1.1 (OFL-1.1), see OFL.txt
+
+Permissions and Redistribution:
+- Free for commercial and non-commercial use, modification, and redistribution.
+- May be bundled and distributed with software under Section 2 & Section 5 of OFL-1.1.
+- Character coverage: Simplified Chinese National Standard GB 2312-80 (6,763 Hanzi),
+  General Standard Chinese Characters List (通用规范汉字表 8,105 Hanzi),
+  Full ASCII, standard punctuation, and Latin symbols.

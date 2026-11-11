@@ -277,11 +277,33 @@ fn main() {
         }
     }
 
+    let (fallback_name, fallback_bytes, font_policy) = if let Some(ref fb) = discovered_fonts.primary_cjk_fallback {
+        let policy = if args.font_path.is_some() {
+            "explicit-font-path"
+        } else {
+            "env-docxide-fonts"
+        };
+        (Some(fb.clone()), discovered_fonts.primary_cjk_font_bytes.clone(), policy)
+    } else {
+        (
+            Some(wordf::EMBEDDED_CJK_FONT_NAME.to_string()),
+            Some(wordf::EMBEDDED_CJK_FONT_BYTES.to_vec()),
+            "system-offline",
+        )
+    };
+
+    let mut available_names = discovered_fonts.family_names;
+    for name in wordf::embedded_cjk_font_names() {
+        if !available_names.contains(&name) {
+            available_names.push(name);
+        }
+    }
+
     let options = ConversionOptions {
         format: args.format,
-        fallback_font_name: discovered_fonts.primary_cjk_fallback.clone(),
-        fallback_font_bytes: discovered_fonts.primary_cjk_font_bytes.clone(),
-        available_font_names: discovered_fonts.family_names,
+        fallback_font_name: fallback_name,
+        fallback_font_bytes: fallback_bytes,
+        available_font_names: available_names,
     };
 
     // Read input snapshot
@@ -370,8 +392,8 @@ fn main() {
         warnings: &all_warnings,
         conversion_ms,
         pre_report_ms,
-        font_policy: "system-offline",
-        fallback_used: discovered_fonts.primary_cjk_fallback.is_some(),
+        font_policy,
+        fallback_used: all_warnings.iter().any(|w| w.code == "font.fallback") || discovered_fonts.primary_cjk_fallback.is_some(),
     };
 
     let report_json_str = if validated.report_json_path.is_some() {

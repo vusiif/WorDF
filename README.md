@@ -127,5 +127,29 @@ WorDF enforces defensive bounds against denial-of-service and malicious inputs:
 
 ## Font Architecture & Fallback Disclosure
 
-- **Underlying Font Resolution**: The underlying `docxide-pdf` layout engine resolves fonts using the process-level `DOCXIDE_FONTS` environment variable and system font directories. Callers injecting CJK fallback fonts via the CLI or public API should ensure that the directory containing the font is accessible via `DOCXIDE_FONTS` or system font directories. When `--font-path` is explicitly specified via the CLI, it unconditionally overrides any pre-set `DOCXIDE_FONTS` environment variable.
-- **Distribution Notice**: Testing fonts used during validation are private local test files and are not embedded or bundled into the distributable source code.
+### Distributable Offline Embedded CJK Font Scheme
+WorDF embeds a legally redistributable, offline-first default CJK TrueType font:
+- **Font Name**: LXGW WenKai Lite (霞鹜文楷 轻便版) Regular
+- **Version**: v1.530 (Release 2026-10-18)
+- **Source**: [lxgw/LxgwWenKai-Lite](https://github.com/lxgw/LxgwWenKai-Lite/releases/tag/v1.530)
+- **SHA256**: `f799a538a3355877e597a0ae04050e897932c9ae7689eb9227c2953c5dd549ea`
+- **License**: SIL Open Font License 1.1 (OFL-1.1). See [assets/fonts/OFL.txt](assets/fonts/OFL.txt) and [assets/fonts/NOTICE.txt](assets/fonts/NOTICE.txt).
+- **Redistribution**: Freely redistributable, commercially usable, and bundled directly within the binary. No user font installation, system font configuration, or network access is required.
+
+### Resolution & Fallback Priority
+When converting documents with East Asian / CJK text, font resolution follows a strict three-tier hierarchy:
+1. **Explicit Parameter (Highest Priority)**:
+   - CLI: `--font-path <path>` (file or directory).
+   - Core API: `ConversionOptions::fallback_font_name` and `fallback_font_bytes`.
+   - Unconditionally overrides both environment variables and the embedded default font.
+2. **Environment Variable**:
+   - `DOCXIDE_FONTS`: Process-level path pointing to directories or font files.
+   - Used when no explicit CLI `--font-path` is provided.
+3. **Embedded Default Font (Fallback)**:
+   - Built-in `LXGW WenKai Lite` in memory.
+   - Active automatically when neither explicit parameters nor `DOCXIDE_FONTS` are specified, guaranteeing 100% offline self-contained conversion in bare container or server environments.
+
+### Character Coverage & Fail-Fast Guarantee
+- **Covered Range**: China National Standard GB 2312-80 (6,763 simplified Chinese characters), General Standard Chinese Characters List (通用规范汉字表 8,105 characters), ASCII, standard punctuation, and Latin symbols.
+- **Fail-Fast Diagnostic**: WorDF pre-flights every text run against the font's Unicode CMap (Format 4 and Format 12). If a document contains characters not supported by the active font, WorDF immediately halts with a typed `MissingFont` error (CLI exit code 3) detailing the missing characters, ensuring no characters are silently dropped.
+
