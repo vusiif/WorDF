@@ -186,6 +186,7 @@ fn test_case_4_output_exists_with_overwrite_succeeds() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_case_5_symlink_output_rejected() {
     let bin = get_bin_path();
     let dir = setup_test_sandbox("case5");
@@ -484,6 +485,7 @@ fn test_case_12_garbage_zip_rejected_code_5() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_case_13_report_temp_failure_cleans_up_pdf_temp() {
     use std::os::unix::fs::PermissionsExt;
     let bin = get_bin_path();

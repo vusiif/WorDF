@@ -3,14 +3,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Built-in fallback font file bytes (LXGW WenKai Lite Regular v1.530).
-pub const EMBEDDED_CJK_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/LXGWWenKaiLite-Regular.ttf");
-
 /// Built-in fallback font primary family name.
 pub const EMBEDDED_CJK_FONT_NAME: &str = "LXGW WenKai Lite";
 
 /// Built-in fallback font localized / Chinese family name.
 pub const EMBEDDED_CJK_FONT_NAME_ALT: &str = "霞鹜文楷 轻便版";
+
+/// Built-in fallback font file bytes (LXGW WenKai Lite Regular v1.530).
+pub const EMBEDDED_CJK_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/LXGWWenKaiLite-Regular.ttf");
 
 /// Return list of recognized names for the embedded CJK font.
 pub fn embedded_cjk_font_names() -> Vec<String> {
@@ -129,11 +129,11 @@ impl FontCmap {
 
             let format = u16::from_be_bytes([bytes[sub_offset], bytes[sub_offset + 1]]);
             if format == 4 {
-                if let Some(sub) = Self::parse_format_4(bytes, sub_offset) {
+                if let Some(sub) = FontCmap::parse_format_4(bytes, sub_offset) {
                     format4_subtables.push(sub);
                 }
             } else if format == 12 {
-                if let Some(groups) = Self::parse_format_12(bytes, sub_offset) {
+                if let Some(groups) = FontCmap::parse_format_12(bytes, sub_offset) {
                     format12_groups.push(groups);
                 }
             }
@@ -268,7 +268,7 @@ impl FontCmap {
         if code <= 0xFFFF {
             let c = code as u16;
             for sub in &self.format4_subtables {
-                if let Some(gid) = Self::lookup_format_4(sub, c, font_bytes) {
+                if let Some(gid) = FontCmap::lookup_format_4(sub, c, font_bytes) {
                     if gid > 0 {
                         return true;
                     }

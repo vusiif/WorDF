@@ -16,7 +16,8 @@ static FONT_INDEX: OnceLock<FontLookup> = OnceLock::new();
 /// Lowercase families that only Mac Roman–named macOS system faces provide.
 static MAC_ONLY_FAMILIES: OnceLock<HashSet<String>> = OnceLock::new();
 
-static DEFAULT_EMBEDDED_FONT: OnceLock<(Vec<String>, &'static [u8])> = OnceLock::new();
+type DefaultEmbeddedFontRecord = (Vec<String>, &'static [u8]);
+static DEFAULT_EMBEDDED_FONT: OnceLock<DefaultEmbeddedFontRecord> = OnceLock::new();
 
 pub fn register_default_embedded_font(names: Vec<String>, data: &'static [u8]) {
     let _ = DEFAULT_EMBEDDED_FONT.set((names, data));
