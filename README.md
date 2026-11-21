@@ -61,17 +61,25 @@ match convert(input_docx_bytes, &options) {
 ### Usage
 
 ```bash
-wordf <input> -o <output.pdf> [OPTIONS]
+# Single document conversion
+wordf <input.docx> -o <output.pdf> [OPTIONS]
+
+# Parallel batch directory conversion (auto-detected when input is a directory)
+wordf <input_dir> -o <output_dir> [-j 4] [OPTIONS]
+
 wordf --help
 wordf --version
 ```
 
 ### Options
-- `-o, --output <path>`: Required output PDF path (`-` stdout rejected).
+- `-o, --output <path>`: Required output PDF file path, or output directory when input is a directory (`-` stdout rejected).
 - `--format <auto|doc|docx>`: Explicit format declaration (default: `auto`).
 - `--overwrite`: Allow replacing existing regular destination files. Default is race-safe no-clobber.
 - `--report-json <path>`: Optional path to write a machine-readable JSON execution report (`-` rejected).
 - `--font-path <path>`: Optional local font file or directory for offline font injection.
+- `-j, --jobs <N>`: Worker thread count for batch directory conversion (default: logical CPU count, zero external dependencies).
+- `-q, --quiet`: Suppress all diagnostic warnings on stderr.
+- `-v, --verbose`: Print detailed phase timings, font policy, and progress diagnostics to stderr.
 - `-h, --help`: Display help and exit (written to `stdout`).
 - `-V, --version`: Display version information and exit (written to `stdout`).
 
@@ -102,9 +110,9 @@ WorDF enforces filesystem boundaries to prevent accidental data loss:
 3. **Symlink Rejection**: Destination PDF and report paths must not be symlinks; symlinks are rejected with exit code 4.
 4. **Parent Directory Existence**: Output parent directories must exist; WorDF does not create directories implicitly.
 5. **Two-Phase Commit**:
-   - *Phase 1*: Outputs are staged into unpredictable, exclusive temporary files (`.wordf_tmp_*`) in the target's parent directory with `0600` permissions.
+   - *Phase 1*: Outputs are staged into unpredictable, exclusive temporary files (`.wordf_tmp_*`) in the target's parent directory with `0600` permissions (or Windows secure exclusive handles).
    - *Phase 2 (Atomic Commit)*:
-     - PDF is committed first. Without `--overwrite`, atomic `renameat2(..., RENAME_NOREPLACE)` ensures no existing file is clobbered.
+     - PDF is committed first. Without `--overwrite`, atomic non-clobber commit ensures no existing file is clobbered (using `renameat2(..., RENAME_NOREPLACE)` on Linux and `MoveFileExW` on Windows).
      - JSON report is committed second. If report commit fails, **the successfully committed PDF is preserved**, and WorDF exits with exit code 9 (`output.report_commit_failed`).
 
 ---
@@ -152,4 +160,33 @@ When converting documents with East Asian / CJK text, font resolution follows a 
 ### Character Coverage & Fail-Fast Guarantee
 - **Covered Range**: China National Standard GB 2312-80 (6,763 simplified Chinese characters), General Standard Chinese Characters List (通用规范汉字表 8,105 characters), ASCII, standard punctuation, and Latin symbols.
 - **Fail-Fast Diagnostic**: WorDF pre-flights every text run against the font's Unicode CMap (Format 4 and Format 12). If a document contains characters not supported by the active font, WorDF immediately halts with a typed `MissingFont` error (CLI exit code 3) detailing the missing characters, ensuring no characters are silently dropped.
+
+---
+
+## Cargo Feature Flags & Binary Footprint
+
+WorDF is engineered for ultra-lightweight deployments:
+
+| Cargo Feature Flag | Default | Release Size | Description |
+|---|:---:|:---:|---|
+| `embedded-cjk-font` | **Yes** | **~12.8 MB** | Bundles Deflate-compressed CJK font in binary with lazy runtime decompression. Zero external setup needed. |
+| `--no-default-features` | No | **~4.9 MB** | Disables font bundling for cloud, container, and embedded environments where system fonts are already present or for non-CJK workloads. |
+
+---
+
+## Release Packaging & Automation
+
+WorDF provides zero-external-dependency automated packaging scripts for cross-platform releases:
+
+- **Windows PowerShell**:
+  ```powershell
+  # Package both full and lite zip distributions with SHA256 checksums
+  powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Flavor all
+  ```
+- **POSIX Bash (Linux / macOS)**:
+  ```bash
+  ./scripts/release.sh all
+  ```
+
+Distribution artifacts, bundled documentation, and cryptographic `SHA256SUMS.txt` are placed in the `dist/` directory.
 

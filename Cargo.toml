@@ -1,6 +1,6 @@
 [package]
 name = "wordf"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Independent DOC / DOCX to PDF converter in Rust"
@@ -8,12 +8,29 @@ description = "Independent DOC / DOCX to PDF converter in Rust"
 [dependencies]
 rwml = { version = "=0.1.4", default-features = false, features = ["render", "docx"] }
 docxide-pdf = { version = "=0.19.0", default-features = false }
-fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
+fontique = { version = "0.11.1", default-features = false }
 zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
 cfb = "=0.10.0"
 imagesize = "=0.14.0"
 libc = "=0.2.191"
 miniz_oxide = "=0.8.9"
 
+[target.'cfg(unix)'.dependencies]
+fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
+
+[build-dependencies]
+miniz_oxide = "=0.8.9"
+
+[features]
+default = ["embedded-cjk-font"]
+embedded-cjk-font = []
+
 [patch.crates-io]
 docxide-pdf = { path = "patches/docxide-pdf" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

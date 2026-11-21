@@ -35,17 +35,38 @@ pub fn convert_docx_route_c(
     bytes: &[u8],
     options: &ConversionOptions,
 ) -> Result<ConversionOutput, ConversionError> {
-    docxide_pdf::register_default_embedded_font(
-        crate::font::embedded_cjk_font_names(),
-        crate::font::EMBEDDED_CJK_FONT_BYTES,
-    );
+    let embedded_bytes = crate::font::embedded_cjk_font_bytes();
+    if !embedded_bytes.is_empty() {
+        docxide_pdf::register_default_embedded_font(
+            crate::font::embedded_cjk_font_names(),
+            embedded_bytes,
+        );
+    }
 
     let (fallback_name, fallback_bytes) = match options.fallback_font_name.as_deref() {
-        Some(name) => (name, options.fallback_font_bytes.as_deref()),
-        None => (
-            crate::font::EMBEDDED_CJK_FONT_NAME,
-            Some(crate::font::EMBEDDED_CJK_FONT_BYTES),
-        ),
+        Some(name) => {
+            let bytes = options.fallback_font_bytes.as_deref().or_else(|| {
+                if !embedded_bytes.is_empty()
+                    && (name == crate::font::EMBEDDED_CJK_FONT_NAME
+                        || name == crate::font::EMBEDDED_CJK_FONT_NAME_ALT)
+                {
+                    Some(embedded_bytes)
+                } else {
+                    None
+                }
+            });
+            (Some(name), bytes)
+        }
+        None => {
+            if !embedded_bytes.is_empty() {
+                (
+                    Some(crate::font::EMBEDDED_CJK_FONT_NAME),
+                    Some(embedded_bytes),
+                )
+            } else {
+                (None, None)
+            }
+        }
     };
 
     let mut available_fonts = options.available_font_names.clone();
@@ -57,10 +78,20 @@ pub fn convert_docx_route_c(
 
     let (adapted_docx, cjk_count) = adapt_docx_cjk_in_memory_with_bytes(
         bytes,
-        Some(fallback_name),
+        fallback_name,
         fallback_bytes,
         &available_fonts,
     )?;
+
+    if cjk_count > 0 && fallback_name.is_none() {
+        return Err(ConversionError {
+            kind: ConversionErrorKind::MissingFont,
+            message: format!(
+                "Document contains {} East Asian characters, but no CJK font is available (built without 'embedded-cjk-font' feature and no fallback font configured).",
+                cjk_count
+            ),
+        });
+    }
 
     let (pdf_bytes, raw_page_count) =
         docxide_pdf::convert_docx_bytes_to_pdf_bytes_with_page_count(&adapted_docx).map_err(
@@ -91,13 +122,15 @@ pub fn convert_docx_route_c(
 
     let mut warnings = Vec::new();
     if cjk_count > 0 {
-        warnings.push(Diagnostic {
-            code: "font.fallback".to_string(),
-            message: format!(
-                "Generic CJK fallback active: {} characters mapped to '{}'",
-                cjk_count, fallback_name
-            ),
-        });
+        if let Some(fb) = fallback_name {
+            warnings.push(Diagnostic {
+                code: "font.fallback".to_string(),
+                message: format!(
+                    "Generic CJK fallback active: {} characters mapped to '{}'",
+                    cjk_count, fb
+                ),
+            });
+        }
     }
 
     Ok(ConversionOutput {

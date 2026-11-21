@@ -1,0 +1,183 @@
+//! CLI argument parsing, flags, help, and error code mapping.
+//! License: GPL-3.0-or-later
+
+use std::env;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process;
+
+use wordf::{ConversionErrorKind, InputFormat};
+
+pub const TOOL_NAME: &str = "wordf";
+pub const TOOL_VERSION: &str = "1.0.0";
+
+pub fn print_help() {
+    println!("WorDF: Independent DOC / DOCX to PDF converter in Rust");
+    println!("License: GPL-3.0-or-later");
+    println!();
+    println!("Usage:");
+    println!("  wordf <input> -o <output> [OPTIONS]");
+    println!("  wordf --help");
+    println!("  wordf --version");
+    println!();
+    println!("Options:");
+    println!("  -o, --output <path>       Output PDF path (or directory when input is a directory)");
+    println!("      --format <FORMAT>     Expected input format: auto (default), doc, or docx");
+    println!("      --overwrite           Allow overwriting existing ordinary output files");
+    println!("      --report-json <path>  Emit machine-readable JSON execution report");
+    println!("      --font-path <path>    Local font file or directory for offline CJK injection");
+    println!("  -j, --jobs <N>            Worker threads for batch conversion (default: logical CPUs)");
+    println!("  -q, --quiet               Suppress all diagnostic warnings on stderr");
+    println!("  -v, --verbose             Print detailed phase timings and diagnostics to stderr");
+    println!("  -h, --help                Show this help message and exit");
+    println!("  -V, --version             Show version and exit");
+}
+
+pub fn print_version() {
+    println!("{} {}", TOOL_NAME, TOOL_VERSION);
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct CliArgs {
+    pub input_path: Option<PathBuf>,
+    pub output_pdf: Option<PathBuf>,
+    pub format: InputFormat,
+    pub overwrite: bool,
+    pub report_json: Option<PathBuf>,
+    pub font_path: Option<String>,
+    pub jobs: Option<usize>,
+    pub quiet: bool,
+    pub verbose: bool,
+}
+
+pub fn parse_cli_args() -> Result<CliArgs, i32> {
+    let args: Vec<OsString> = env::args_os().collect();
+    if args.len() <= 1 {
+        print_help();
+        return Err(2);
+    }
+
+    // P0 positional route rejection
+    let first_arg = args[1].to_string_lossy();
+    if first_arg == "a" || first_arg == "b" || first_arg == "c" {
+        eprintln!(
+            "Error: P0 positional route syntax 'wordf <a|b|c> ...' has been deprecated and replaced by the P1 CLI contract."
+        );
+        eprintln!(
+            "Usage: wordf <input> -o <output.pdf> [--format auto|doc|docx] [--overwrite] [--report-json <report.json>]"
+        );
+        return Err(2);
+    }
+
+    let mut parsed = CliArgs::default();
+    let mut i = 1;
+
+    while i < args.len() {
+        let arg_str = args[i].to_string_lossy();
+        if arg_str == "--help" || arg_str == "-h" {
+            print_help();
+            process::exit(0);
+        } else if arg_str == "--version" || arg_str == "-V" {
+            print_version();
+            process::exit(0);
+        } else if arg_str == "-o" || arg_str == "--output" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '{}'", arg_str);
+                return Err(2);
+            }
+            parsed.output_pdf = Some(PathBuf::from(&args[i]));
+        } else if arg_str == "--format" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--format'");
+                return Err(2);
+            }
+            let fmt_str = args[i].to_string_lossy().to_lowercase();
+            match fmt_str.as_str() {
+                "auto" => parsed.format = InputFormat::Auto,
+                "doc" => parsed.format = InputFormat::Doc,
+                "docx" => parsed.format = InputFormat::Docx,
+                other => {
+                    eprintln!("Error: Unknown format '{}'. Expected 'auto', 'doc', or 'docx'", other);
+                    return Err(2);
+                }
+            }
+        } else if arg_str == "--overwrite" {
+            parsed.overwrite = true;
+        } else if arg_str == "--report-json" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--report-json'");
+                return Err(2);
+            }
+            parsed.report_json = Some(PathBuf::from(&args[i]));
+        } else if arg_str == "--font-path" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--font-path'");
+                return Err(2);
+            }
+            parsed.font_path = Some(args[i].to_string_lossy().to_string());
+        } else if arg_str == "-j" || arg_str == "--jobs" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '{}'", arg_str);
+                return Err(2);
+            }
+            let jobs_val = match args[i].to_string_lossy().parse::<usize>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    eprintln!("Error: Invalid jobs count '{}'. Expected positive integer.", args[i].to_string_lossy());
+                    return Err(2);
+                }
+            };
+            parsed.jobs = Some(jobs_val);
+        } else if arg_str == "-q" || arg_str == "--quiet" {
+            parsed.quiet = true;
+        } else if arg_str == "-v" || arg_str == "--verbose" {
+            parsed.verbose = true;
+        } else if arg_str.starts_with('-') {
+            eprintln!("Error: Unknown or unsupported option '{}'", arg_str);
+            return Err(2);
+        } else {
+            if parsed.input_path.is_some() {
+                eprintln!("Error: Multiple inputs provided ('{:?}' and '{:?}'). WorDF processes exactly one target file or directory.", parsed.input_path.unwrap(), arg_str);
+                return Err(2);
+            }
+            parsed.input_path = Some(PathBuf::from(&args[i]));
+        }
+        i += 1;
+    }
+
+    if parsed.input_path.is_none() {
+        eprintln!("Error: Mandatory input file path is missing.");
+        return Err(2);
+    }
+
+    if parsed.output_pdf.is_none() {
+        eprintln!("Error: Mandatory output path '-o <output.pdf>' is missing.");
+        return Err(2);
+    }
+
+    if parsed.quiet && parsed.verbose {
+        eprintln!("Error: Cannot specify both '--quiet' and '--verbose'.");
+        return Err(2);
+    }
+
+    Ok(parsed)
+}
+
+pub fn map_conversion_error_to_exit_code(err: &ConversionErrorKind) -> i32 {
+    match err {
+        ConversionErrorKind::UnsupportedFormat => 3,
+        ConversionErrorKind::UnsupportedVersion => 3,
+        ConversionErrorKind::Encrypted => 3,
+        ConversionErrorKind::MissingFont => 3,
+        ConversionErrorKind::CorruptInput => 5,
+        ConversionErrorKind::ResourceLimit => 6,
+        ConversionErrorKind::BackendFailure => 8,
+        ConversionErrorKind::UnsupportedCapability => 3,
+        ConversionErrorKind::Internal => 8,
+    }
+}

@@ -571,6 +571,7 @@ fn test_case_14_font_path_overrides_preset_env() {
 }
 
 #[test]
+#[cfg(feature = "embedded-cjk-font")]
 fn test_case_15_chinese_docx_cli_default_embedded_font() {
     let bin = get_bin_path();
     let dir = setup_test_sandbox("case15");
@@ -609,6 +610,7 @@ fn test_case_15_chinese_docx_cli_default_embedded_font() {
 }
 
 #[test]
+#[cfg(feature = "embedded-cjk-font")]
 fn test_case_16_chinese_docx_unsupported_glyph_fails_fast_exit_3() {
     let bin = get_bin_path();
     let dir = setup_test_sandbox("case16");
@@ -631,6 +633,106 @@ fn test_case_16_chinese_docx_unsupported_glyph_fails_fast_exit_3() {
 
     let stderr_str = String::from_utf8_lossy(&output.stderr);
     assert!(stderr_str.contains("Font diagnostic failure"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_17_cli_quiet_suppresses_warnings() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case17_quiet");
+    // Extension mismatch triggers a warning
+    let input = dir.join("mismatch_name.doc");
+    let out_pdf = dir.join("quiet_out.pdf");
+    fs::write(&input, make_test_docx("Quiet flag testing")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("-o")
+        .arg(&out_pdf)
+        .arg("-q")
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(0), "CLI with -q must succeed");
+    assert!(out_pdf.exists(), "Output PDF must exist");
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_str.trim().is_empty(),
+        "Quiet mode must suppress all diagnostic warnings on stderr, got: '{}'",
+        stderr_str
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_18_cli_verbose_prints_phase_timings() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case18_verbose");
+    let input = dir.join("verbose_test.docx");
+    let out_pdf = dir.join("verbose_out.pdf");
+    fs::write(&input, make_test_docx("Verbose flag testing")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("-o")
+        .arg(&out_pdf)
+        .arg("-v")
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(0), "CLI with -v must succeed");
+    assert!(out_pdf.exists(), "Output PDF must exist");
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr_str.contains("[verbose] Reading input file:"));
+    assert!(stderr_str.contains("[verbose] Font discovery policy:"));
+    assert!(stderr_str.contains("[verbose] Converted document in"));
+    assert!(stderr_str.contains("[verbose] Committed PDF to"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_19_batch_directory_conversion_scoped_concurrency() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case19_batch");
+    let in_dir = dir.join("inputs");
+    let out_dir = dir.join("outputs");
+    fs::create_dir_all(&in_dir).unwrap();
+
+    // Create valid test files
+    fs::write(in_dir.join("doc_a.docx"), make_test_docx("Doc A content")).unwrap();
+    fs::write(in_dir.join("doc_b.docx"), make_test_docx("Doc B content")).unwrap();
+    fs::write(in_dir.join("doc_c.docx"), make_test_docx("Doc C content")).unwrap();
+
+    // Create an Office temporary/lock file that must be skipped
+    fs::write(in_dir.join("~$doc_a.docx"), b"office temp lock bytes").unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("-j")
+        .arg("2")
+        .arg("-v")
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(0), "Batch conversion must succeed");
+    assert!(out_dir.join("doc_a.pdf").exists(), "doc_a.pdf must exist");
+    assert!(out_dir.join("doc_b.pdf").exists(), "doc_b.pdf must exist");
+    assert!(out_dir.join("doc_c.pdf").exists(), "doc_c.pdf must exist");
+    assert!(
+        !out_dir.join("~$doc_a.pdf").exists(),
+        "Temporary lock file must NOT be converted"
+    );
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr_str.contains("[verbose] Discovered 3 documents"));
+    assert!(stderr_str.contains("Batch conversion complete. Total: 3, Succeeded: 3"));
 
     let _ = fs::remove_dir_all(&dir);
 }

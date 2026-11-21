@@ -224,6 +224,7 @@ fn test_consumer_reject_garbage_zip_corrupt_input() {
 }
 
 #[test]
+#[cfg(feature = "embedded-cjk-font")]
 fn test_consumer_convert_chinese_docx_with_default_embedded_font() {
     let docx = make_test_docx("你好世界，独立离线中文字体方案测试。");
     // Completely default options: no fallback font name specified, no system font path.
@@ -248,8 +249,9 @@ fn test_consumer_convert_chinese_docx_with_default_embedded_font() {
 }
 
 #[test]
+#[cfg(feature = "embedded-cjk-font")]
 fn test_consumer_embedded_font_cmap_coverage_and_fail_fast() {
-    let font_bytes = wordf::EMBEDDED_CJK_FONT_BYTES;
+    let font_bytes = wordf::embedded_cjk_font_bytes();
     assert!(!font_bytes.is_empty(), "Embedded font bytes must not be empty");
 
     let cmap = wordf::FontCmap::from_bytes(font_bytes).expect("Embedded font cmap parsing must succeed");
@@ -273,13 +275,46 @@ fn test_consumer_embedded_font_cmap_coverage_and_fail_fast() {
 }
 
 #[test]
+#[cfg(feature = "embedded-cjk-font")]
 fn test_consumer_embedded_font_family_names() {
-    let font_bytes = wordf::EMBEDDED_CJK_FONT_BYTES;
+    let font_bytes = wordf::embedded_cjk_font_bytes();
     let names = wordf::font::extract_font_family_names(font_bytes);
     assert!(
         names.contains(&wordf::EMBEDDED_CJK_FONT_NAME.to_string()),
         "Extracted names {:?} must contain '{}'",
         names,
         wordf::EMBEDDED_CJK_FONT_NAME
+    );
+}
+
+#[test]
+#[cfg(not(feature = "embedded-cjk-font"))]
+fn test_consumer_no_embedded_font_cjk_fails_with_missing_font() {
+    let docx = make_test_docx("你好世界，无内置字体测试。");
+    let options = ConversionOptions::default();
+    let err = convert(&docx, &options).expect_err("Conversion of CJK DOCX without embedded font must fail with MissingFont");
+    assert_eq!(err.kind, ConversionErrorKind::MissingFont);
+}
+
+#[test]
+fn test_consumer_convert_binary_doc_route_b_sample() {
+    let sample_candidates = [
+        ".sandbox-test/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rwml-0.1.4/corpus/public/benchmark/sample/floating_text_bearing.doc",
+    ];
+
+    let Some(doc_path) = sample_candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+        return;
+    };
+
+    let doc_bytes = std::fs::read(doc_path).expect("Failed to read sample DOC file");
+    let options = ConversionOptions::default();
+
+    let result = convert(&doc_bytes, &options).expect("Conversion of binary DOC file must succeed");
+    assert!(!result.pdf.is_empty(), "PDF bytes must not be empty");
+    assert!(result.pdf.starts_with(b"%PDF-"), "PDF must start with %PDF- header");
+    assert!(result.page_count >= 1, "Page count must be >= 1");
+    assert!(
+        result.warnings.iter().any(|w| w.code == "layout.approximate"),
+        "Route B must produce layout.approximate warning diagnostic"
     );
 }
