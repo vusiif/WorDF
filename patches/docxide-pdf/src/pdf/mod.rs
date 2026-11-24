@@ -4438,6 +4438,13 @@ pub fn render(doc: &Document) -> Result<Vec<u8>, Error> {
 }
 
 pub fn render_with_page_count(doc: &Document) -> Result<(Vec<u8>, usize), Error> {
+    render_with_page_filter(doc, None)
+}
+
+pub fn render_with_page_filter(
+    doc: &Document,
+    page_filter: Option<&[usize]>,
+) -> Result<(Vec<u8>, usize), Error> {
     let debug_wrap = std::env::var("DOCXIDE_DEBUG_WRAP").is_ok();
     let t0 = std::time::Instant::now();
     let mut pdf = Pdf::new();
@@ -5502,7 +5509,148 @@ pub fn render_with_page_count(doc: &Document) -> Result<(Vec<u8>, usize), Error>
         })
         .collect();
 
-    let page_count = state.pb.all_contents.len();
+    let total_pages = state.pb.all_contents.len();
+
+    if let Some(filter) = page_filter {
+        if filter.is_empty() {
+            return Err(Error::Pdf("empty page filter requested".to_string()));
+        }
+        for &idx in filter {
+            if idx >= total_pages {
+                return Err(Error::Pdf(format!(
+                    "requested page {} out of range (total pages: {})",
+                    idx + 1,
+                    total_pages
+                )));
+            }
+        }
+    }
+
+    let (
+        valign_offsets,
+        all_contents,
+        all_deferred_shapes,
+        mut all_hf_contents,
+        all_links,
+        all_comment_anchors,
+        all_alpha_states,
+        all_gradient_specs,
+        page_section_indices,
+        heading_entries,
+        tags,
+    ) = if let Some(filter) = page_filter {
+        let mut v_valign = Vec::with_capacity(filter.len());
+        let mut v_hf = Vec::with_capacity(filter.len());
+        let mut v_links = Vec::with_capacity(filter.len());
+        let mut v_anchors = Vec::with_capacity(filter.len());
+        let mut v_alpha = Vec::with_capacity(filter.len());
+        let mut v_gradient = Vec::with_capacity(filter.len());
+        let mut v_sec = Vec::with_capacity(filter.len());
+
+        let old_to_new: HashMap<usize, usize> = filter
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(new_idx, old_idx)| (old_idx, new_idx))
+            .collect();
+
+        let filtered_headings: Vec<HeadingEntry> = state
+            .heading_entries
+            .into_iter()
+            .filter_map(|mut entry| {
+                if let Some(&new_page) = old_to_new.get(&entry.page_idx) {
+                    entry.page_idx = new_page;
+                    Some(entry)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut links_map: HashMap<usize, _> =
+            state.pb.all_links.into_iter().enumerate().collect();
+        let mut anchors_map: HashMap<usize, _> =
+            state.pb.all_comment_anchors.into_iter().enumerate().collect();
+        let mut alpha_map: HashMap<usize, _> =
+            state.pb.all_alpha_states.into_iter().enumerate().collect();
+        let mut gradient_map: HashMap<usize, _> =
+            state.pb.all_gradient_specs.into_iter().enumerate().collect();
+        let mut sec_map: HashMap<usize, _> =
+            state.pb.page_section_indices.into_iter().enumerate().collect();
+
+        for &idx in filter {
+            v_valign.push(valign_offsets[idx]);
+            v_hf.push(all_hf_contents[idx].take());
+            v_links.push(links_map.remove(&idx).unwrap_or_default());
+            v_anchors.push(anchors_map.remove(&idx).unwrap_or_default());
+            v_alpha.push(alpha_map.remove(&idx).unwrap_or_default());
+            v_gradient.push(gradient_map.remove(&idx).unwrap_or_default());
+            v_sec.push(sec_map.remove(&idx).unwrap_or_default());
+        }
+
+        let mut contents_map: HashMap<usize, _> =
+            state.pb.all_contents.into_iter().enumerate().collect();
+        let mut shapes_map: HashMap<usize, _> =
+            state.pb.all_deferred_shapes.into_iter().enumerate().collect();
+
+        let mut v_contents = Vec::with_capacity(filter.len());
+        let mut v_shapes = Vec::with_capacity(filter.len());
+
+        for &idx in filter {
+            if let Some(c) = contents_map.remove(&idx) {
+                v_contents.push(c);
+            }
+            if let Some(s) = shapes_map.remove(&idx) {
+                v_shapes.push(s);
+            }
+        }
+
+        (
+            v_valign,
+            v_contents,
+            v_shapes,
+            v_hf,
+            v_links,
+            v_anchors,
+            v_alpha,
+            v_gradient,
+            v_sec,
+            filtered_headings,
+            tagging::Tags::new(),
+        )
+    } else {
+        (
+            valign_offsets,
+            state.pb.all_contents,
+            state.pb.all_deferred_shapes,
+            all_hf_contents,
+            state.pb.all_links,
+            state.pb.all_comment_anchors,
+            state.pb.all_alpha_states,
+            state.pb.all_gradient_specs,
+            state.pb.page_section_indices,
+            state.heading_entries,
+            state.pb.tags,
+        )
+    };
+
+    let bookmark_positions: HashMap<String, (usize, f32)> = if let Some(filter) = page_filter {
+        let old_to_new: HashMap<usize, usize> = filter
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(new_idx, old_idx)| (old_idx, new_idx))
+            .collect();
+        state
+            .bookmark_positions
+            .into_iter()
+            .filter_map(|(name, (p, y))| old_to_new.get(&p).map(|&new_p| (name, (new_p, y))))
+            .collect()
+    } else {
+        state.bookmark_positions
+    };
+
+    let page_count = all_contents.len();
 
     assemble_pdf_pages(
         &mut pdf,
@@ -5510,21 +5658,21 @@ pub fn render_with_page_count(doc: &Document) -> Result<(Vec<u8>, usize), Error>
         catalog_id,
         pages_id,
         valign_offsets,
-        state.pb.all_contents,
-        state.pb.all_deferred_shapes,
+        all_contents,
+        all_deferred_shapes,
         &mut all_hf_contents,
-        &state.pb.all_links,
-        &state.pb.all_comment_anchors,
-        &state.pb.all_alpha_states,
-        &state.pb.all_gradient_specs,
-        &state.pb.page_section_indices,
+        &all_links,
+        &all_comment_anchors,
+        &all_alpha_states,
+        &all_gradient_specs,
+        &page_section_indices,
         ctx.fonts,
         &font_order,
         &image_xobjects,
         doc,
-        &state.bookmark_positions,
-        &state.heading_entries,
-        &state.pb.tags,
+        &bookmark_positions,
+        &heading_entries,
+        &tags,
     );
 
     let t_assembly = t0.elapsed();

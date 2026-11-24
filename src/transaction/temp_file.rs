@@ -65,12 +65,12 @@ pub fn os_random_bytes(buf: &mut [u8]) -> io::Result<()> {
             )
         };
         if status == 0 {
-            return Ok(());
+            Ok(())
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("BCryptGenRandom failed with NTSTATUS 0x{:08X}", status),
-            ));
+            Err(io::Error::other(format!(
+                "BCryptGenRandom failed with NTSTATUS 0x{:08X}",
+                status
+            )))
         }
     }
 

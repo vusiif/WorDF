@@ -119,6 +119,25 @@ fn test_consumer_reject_encrypted_package() {
 }
 
 #[test]
+fn test_consumer_reject_encrypted_cfb_package() {
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut comp = cfb::CompoundFile::create(&mut cursor).unwrap();
+        let mut stream = comp.create_new_stream("/EncryptedPackage").unwrap();
+        stream.write_all(b"encrypted office data stream").unwrap();
+    }
+    let encrypted_cfb = cursor.into_inner();
+
+    let options = ConversionOptions::default();
+    let err = convert(&encrypted_cfb, &options).unwrap_err();
+    assert_eq!(
+        err.kind,
+        ConversionErrorKind::Encrypted,
+        "CFB container with EncryptedPackage stream must be classified as Encrypted (exit code 3)"
+    );
+}
+
+#[test]
 fn test_consumer_reject_oversized_input() {
     // 129 MiB dummy input
     let fake_oversized = vec![0u8; 129 * 1024 * 1024];
@@ -317,4 +336,95 @@ fn test_consumer_convert_binary_doc_route_b_sample() {
         result.warnings.iter().any(|w| w.code == "layout.approximate"),
         "Route B must produce layout.approximate warning diagnostic"
     );
+}
+
+#[test]
+fn test_consumer_pages_slice_export_api() {
+    let docx = make_test_docx("Page 1 text");
+    // 1. Valid page 0 (1-based page 1)
+    let opts = ConversionOptions {
+        pages: Some(vec![0]),
+        ..Default::default()
+    };
+    let res = convert(&docx, &opts).expect("Slice export of page 0 must succeed");
+    assert_eq!(res.page_count, 1);
+    assert!(res.pdf.starts_with(b"%PDF-"));
+
+    // 2. Out of bounds page index
+    let opts_oob = ConversionOptions {
+        pages: Some(vec![5]),
+        ..Default::default()
+    };
+    let err = convert(&docx, &opts_oob).expect_err("Out of bounds page must return error");
+    assert_eq!(err.kind, ConversionErrorKind::PageOutOfRange);
+}
+
+#[test]
+fn test_consumer_encrypted_docx_roundtrip_api() {
+    let docx = make_test_docx("Secret Document Protected Content");
+    let password = "TopSecretPassword2026!";
+    let encrypted_cfb = wordf::crypto::agile::build_agile_encrypted_cfb_for_test(&docx, password);
+
+    // 1. Missing password -> must return Encrypted error (exit code 3)
+    let opts_no_pwd = ConversionOptions::default();
+    let err_no_pwd = convert(&encrypted_cfb, &opts_no_pwd).expect_err("Encrypted doc without password must fail");
+    assert_eq!(err_no_pwd.kind, ConversionErrorKind::Encrypted);
+    assert_eq!(err_no_pwd.kind.exit_code(), 3);
+    assert!(err_no_pwd.message.contains("password-protected"));
+
+    // 2. Wrong password -> must return Encrypted error with incorrect password message
+    let opts_wrong = ConversionOptions {
+        password: Some("WrongPassword999".to_string()),
+        ..Default::default()
+    };
+    let err_wrong = convert(&encrypted_cfb, &opts_wrong).expect_err("Encrypted doc with wrong password must fail");
+    assert_eq!(err_wrong.kind, ConversionErrorKind::Encrypted);
+    assert_eq!(err_wrong.kind.exit_code(), 3);
+    assert!(err_wrong.message.contains("Incorrect password"));
+
+    // 3. Correct password -> must succeed and yield valid PDF
+    let opts_correct = ConversionOptions {
+        password: Some(password.to_string()),
+        ..Default::default()
+    };
+    let res = convert(&encrypted_cfb, &opts_correct).expect("Decryption and conversion with correct password must succeed");
+    assert!(!res.pdf.is_empty());
+    assert!(res.pdf.starts_with(b"%PDF-"));
+    assert!(res.page_count >= 1);
+
+    // 4. Document analysis with password
+    let analysis_res = wordf::analyze_document(&encrypted_cfb, &opts_correct)
+        .expect("Analysis with correct password must succeed");
+    assert_eq!(analysis_res.format_name, "OOXML DOCX");
+    assert_eq!(analysis_res.paragraph_count, 1);
+}
+
+#[test]
+fn test_consumer_metadata_injection_and_pdf_info() {
+    let docx = make_test_docx("Metadata Test Document Content");
+    let opts = ConversionOptions {
+        metadata: Some(wordf::DocumentMetadata {
+            title: Some("Annual Financial Report 2026".to_string()),
+            author: Some("Finance Department".to_string()),
+            subject: Some("Q1 Earnings".to_string()),
+            keywords: Some("finance,earnings".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    let result = convert(&docx, &opts).expect("Conversion with metadata must succeed");
+    assert!(!result.pdf.is_empty());
+    assert!(result.pdf.starts_with(b"%PDF-"));
+
+    let pdf_str = String::from_utf8_lossy(&result.pdf);
+    // Info dictionary and XMP metadata checks
+    assert!(pdf_str.contains("Annual Financial Report 2026"), "PDF must embed custom Title");
+    assert!(pdf_str.contains("Finance Department"), "PDF must embed custom Author/Creator");
+    assert!(pdf_str.contains("Q1 Earnings"), "PDF must embed custom Subject");
+    assert!(pdf_str.contains("finance,earnings"), "PDF must embed custom Keywords");
+
+    // Analysis mode check
+    let analysis = wordf::analyze_document(&docx, &opts).expect("Analyze with metadata must succeed");
+    assert_eq!(analysis.metadata.title.as_deref(), Some("Annual Financial Report 2026"));
+    assert_eq!(analysis.metadata.author.as_deref(), Some("Finance Department"));
 }

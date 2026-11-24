@@ -1,7 +1,7 @@
 //! DOCX styles.xml parser and document-default CJK font injection.
 //! License: GPL-3.0-or-later
 
-use super::xml::{find_tag_closing_bracket, update_or_insert_attribute};
+use super::xml::{escape_xml_attr, extract_attribute_value, find_tag_closing_bracket, update_or_insert_attribute};
 
 pub fn is_styles_part(name: &str) -> bool {
     name == "word/styles.xml"
@@ -14,13 +14,7 @@ pub fn adapt_styles_xml(
     fallback_font: &str,
     available_fonts: &[String],
 ) -> String {
-    // Check if available CJK font is already active in document defaults
-    for font in available_fonts {
-        if styles_xml.contains(font) {
-            return styles_xml.to_string();
-        }
-    }
-
+    let escaped_font = escape_xml_attr(fallback_font);
     let mut result = styles_xml.to_string();
 
     // 1. Handle <w:docDefaults>
@@ -35,19 +29,26 @@ pub fn adapt_styles_xml(
                 if let Some(rf_end_rel) = find_tag_closing_bracket(&result[after_rf..]) {
                     let abs_rf_end = after_rf + rf_end_rel;
                     let rf_tag = &result[abs_rf_start..=abs_rf_end];
-                    let updated_rf = update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
 
-                    let mut new_xml = String::with_capacity(result.len() + 64);
-                    new_xml.push_str(&result[..abs_rf_start]);
-                    new_xml.push_str(&updated_rf);
-                    new_xml.push_str(&result[abs_rf_end + 1..]);
-                    result = new_xml;
+                    let already_has_cjk = extract_attribute_value(rf_tag, "w:eastAsia")
+                        .map(|font_name| available_fonts.iter().any(|f| f.eq_ignore_ascii_case(font_name)))
+                        .unwrap_or(false);
+
+                    if !already_has_cjk {
+                        let updated_rf = update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
+
+                        let mut new_xml = String::with_capacity(result.len() + 64);
+                        new_xml.push_str(&result[..abs_rf_start]);
+                        new_xml.push_str(&updated_rf);
+                        new_xml.push_str(&result[abs_rf_end + 1..]);
+                        result = new_xml;
+                    }
                 }
             } else if let Some(rpr_end_rel) = dd_block.find("</w:rPr>") {
                 let abs_rpr_end = dd_start + rpr_end_rel;
                 let mut new_xml = String::with_capacity(result.len() + 64);
                 new_xml.push_str(&result[..abs_rpr_end]);
-                new_xml.push_str(&format!(r#"<w:rFonts w:eastAsia="{}"/>"#, fallback_font));
+                new_xml.push_str(&format!(r#"<w:rFonts w:eastAsia="{}"/>"#, escaped_font));
                 new_xml.push_str(&result[abs_rpr_end..]);
                 result = new_xml;
             } else {
@@ -56,7 +57,7 @@ pub fn adapt_styles_xml(
                 new_xml.push_str(&result[..dd_end]);
                 new_xml.push_str(&format!(
                     r#"<w:rPrDefault><w:rPr><w:rFonts w:eastAsia="{}"/></w:rPr></w:rPrDefault>"#,
-                    fallback_font
+                    escaped_font
                 ));
                 new_xml.push_str(&result[dd_end..]);
                 result = new_xml;
@@ -71,7 +72,7 @@ pub fn adapt_styles_xml(
             new_xml.push_str(&result[..=abs_tag_end]);
             new_xml.push_str(&format!(
                 r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:eastAsia="{}"/></w:rPr></w:rPrDefault></w:docDefaults>"#,
-                fallback_font
+                escaped_font
             ));
             new_xml.push_str(&result[abs_tag_end + 1..]);
             result = new_xml;
@@ -92,13 +93,20 @@ pub fn adapt_styles_xml(
                     if let Some(rf_end_rel) = find_tag_closing_bracket(&result[after_rf..]) {
                         let abs_rf_end = after_rf + rf_end_rel;
                         let rf_tag = &result[abs_rf_start..=abs_rf_end];
-                        let updated_rf = update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
 
-                        let mut new_xml = String::with_capacity(result.len() + 64);
-                        new_xml.push_str(&result[..abs_rf_start]);
-                        new_xml.push_str(&updated_rf);
-                        new_xml.push_str(&result[abs_rf_end + 1..]);
-                        result = new_xml;
+                        let already_has_cjk = extract_attribute_value(rf_tag, "w:eastAsia")
+                            .map(|font_name| available_fonts.iter().any(|f| f.eq_ignore_ascii_case(font_name)))
+                            .unwrap_or(false);
+
+                        if !already_has_cjk {
+                            let updated_rf = update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
+
+                            let mut new_xml = String::with_capacity(result.len() + 64);
+                            new_xml.push_str(&result[..abs_rf_start]);
+                            new_xml.push_str(&updated_rf);
+                            new_xml.push_str(&result[abs_rf_end + 1..]);
+                            result = new_xml;
+                        }
                     }
                 }
             }
@@ -125,6 +133,16 @@ mod tests {
         let adapted = adapt_styles_xml(styles, "SimSun", &[]);
         assert!(adapted.contains(r#"w:ascii="Calibri""#), "West-European font must be preserved");
         assert!(adapted.contains(r#"w:eastAsia="SimSun""#), "East Asian font must be injected");
+    }
+
+    #[test]
+    fn test_adapt_styles_not_skipped_by_available_western_font() {
+        // Even if available_fonts includes "Calibri" or "Arial", presence of Calibri in styles.xml
+        // must not skip injecting w:eastAsia="SimSun".
+        let styles = r#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#;
+        let available = vec!["Calibri".to_string(), "Arial".to_string()];
+        let adapted = adapt_styles_xml(styles, "SimSun", &available);
+        assert!(adapted.contains(r#"w:eastAsia="SimSun""#), "East Asian font must still be injected even if western fonts are present in available_fonts");
     }
 
     #[test]

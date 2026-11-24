@@ -1,22 +1,29 @@
 //! WorDF: Independent DOC / DOCX to PDF converter in Rust
 //! License: GPL-3.0-or-later
 
+pub mod analyze;
 pub mod backend;
 pub mod compat;
+pub mod crypto;
 pub mod docx_adapt;
 pub mod font;
 pub mod format;
+pub mod metadata;
+pub mod pages;
 pub mod report;
 pub mod transaction;
 
 use std::error::Error;
 use std::fmt;
 
+pub use analyze::{analyze_document, DocumentAnalysis};
 pub use compat::*;
+pub use metadata::DocumentMetadata;
+pub use pages::PageRange;
 pub use font::{
-    count_cjk_chars, embedded_cjk_font_bytes, embedded_cjk_font_names, is_cjk_char, FontCmap,
-    Format12Group, Format4Subtable, EMBEDDED_CJK_FONT_BYTES, EMBEDDED_CJK_FONT_NAME,
-    EMBEDDED_CJK_FONT_NAME_ALT,
+    count_cjk_chars, embedded_cjk_font_bytes, embedded_cjk_font_names, is_cjk_char,
+    FallbackFontItem, FontCmap, FontFallbackChain, Format12Group, Format4Subtable,
+    EMBEDDED_CJK_FONT_BYTES, EMBEDDED_CJK_FONT_NAME, EMBEDDED_CJK_FONT_NAME_ALT,
 };
 
 /// Input format explicit declaration or automatic detection.
@@ -42,6 +49,14 @@ pub struct ConversionOptions {
     pub fallback_font_bytes: Option<Vec<u8>>,
     /// System or environment available font family names.
     pub available_font_names: Vec<String>,
+    /// Optional multi-tiered CJK fallback font chain for cascading glyph resolution.
+    pub fallback_chain: Option<FontFallbackChain>,
+    /// Optional 0-based sorted, deduplicated page indices to export (e.g. from --pages).
+    pub pages: Option<Vec<usize>>,
+    /// Optional decryption password for password-protected documents.
+    pub password: Option<String>,
+    /// Optional document metadata overrides (Title, Author, Subject, Keywords) to inject into PDF.
+    pub metadata: Option<DocumentMetadata>,
 }
 
 impl Default for ConversionOptions {
@@ -51,6 +66,10 @@ impl Default for ConversionOptions {
             fallback_font_name: None,
             fallback_font_bytes: None,
             available_font_names: Vec::new(),
+            fallback_chain: None,
+            pages: None,
+            password: None,
+            metadata: None,
         }
     }
 }
@@ -94,8 +113,28 @@ pub enum ConversionErrorKind {
     BackendFailure,
     /// Requested unsupported capability.
     UnsupportedCapability,
+    /// Requested page out of range.
+    PageOutOfRange,
     /// Internal library error.
     Internal,
+}
+
+impl ConversionErrorKind {
+    /// Standard CLI exit code corresponding to this conversion error category.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::UnsupportedFormat => 3,
+            Self::UnsupportedVersion => 3,
+            Self::Encrypted => 3,
+            Self::MissingFont => 3,
+            Self::CorruptInput => 5,
+            Self::ResourceLimit => 6,
+            Self::BackendFailure => 8,
+            Self::UnsupportedCapability => 3,
+            Self::PageOutOfRange => 3,
+            Self::Internal => 8,
+        }
+    }
 }
 
 /// Strongly typed conversion error entity implementing standard error traits.
@@ -124,11 +163,17 @@ pub fn convert(
     input: &[u8],
     options: &ConversionOptions,
 ) -> Result<ConversionOutput, ConversionError> {
-    let (fmt, mut pre_warnings) = format::verify_and_detect_format(input, options.format)?;
+    let decrypted_holder = crypto::decrypt_office_document(input, options.password.as_deref())?;
+    let effective_input: &[u8] = match decrypted_holder.as_deref() {
+        Some(d) => d,
+        None => input,
+    };
+
+    let (fmt, mut pre_warnings) = format::verify_and_detect_format(effective_input, options.format)?;
 
     let mut output = match fmt {
-        InputFormat::Doc => backend::convert_doc_route_b(input, options)?,
-        InputFormat::Docx => backend::convert_docx_route_c(input, options)?,
+        InputFormat::Doc => backend::convert_doc_route_b(effective_input, options)?,
+        InputFormat::Docx => backend::convert_docx_route_c(effective_input, options)?,
         InputFormat::Auto => unreachable!(),
     };
 

@@ -24,9 +24,19 @@ pub fn print_help() {
     println!("  -o, --output <path>       Output PDF path (or directory when input is a directory)");
     println!("      --format <FORMAT>     Expected input format: auto (default), doc, or docx");
     println!("      --overwrite           Allow overwriting existing ordinary output files");
+    println!("      --strict              Fail with non-zero exit code on any diagnostic warning");
+    println!("      --analyze             Inspect and diagnose document compatibility without generating PDF");
+    println!("      --pages <RANGE>       Export specific page ranges (e.g. '1-3', '2', '1-3,5,8-10')");
+    println!("      --password <string>   Decryption password for password-protected documents");
+    println!("      --title <string>      Set or override document Title metadata in generated PDF");
+    println!("      --author <string>     Set or override document Author/Creator metadata in generated PDF");
+    println!("      --subject <string>    Set or override document Subject metadata in generated PDF");
+    println!("      --keywords <string>   Set or override document Keywords metadata in generated PDF");
+    println!("      --resume              Skip conversion if target PDF already exists and is newer than input");
     println!("      --report-json <path>  Emit machine-readable JSON execution report");
     println!("      --font-path <path>    Local font file or directory for offline CJK injection");
     println!("  -j, --jobs <N>            Worker threads for batch conversion (default: logical CPUs)");
+    println!("  -r, --recursive           Recursively scan subdirectories in batch conversion");
     println!("  -q, --quiet               Suppress all diagnostic warnings on stderr");
     println!("  -v, --verbose             Print detailed phase timings and diagnostics to stderr");
     println!("  -h, --help                Show this help message and exit");
@@ -45,7 +55,15 @@ pub struct CliArgs {
     pub overwrite: bool,
     pub report_json: Option<PathBuf>,
     pub font_path: Option<String>,
+    pub font_paths: Vec<String>,
     pub jobs: Option<usize>,
+    pub recursive: bool,
+    pub strict: bool,
+    pub analyze: bool,
+    pub resume: bool,
+    pub pages: Option<Vec<usize>>,
+    pub password: Option<String>,
+    pub metadata: wordf::DocumentMetadata,
     pub quiet: bool,
     pub verbose: bool,
 }
@@ -105,6 +123,62 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
             }
         } else if arg_str == "--overwrite" {
             parsed.overwrite = true;
+        } else if arg_str == "--strict" {
+            parsed.strict = true;
+        } else if arg_str == "--analyze" {
+            parsed.analyze = true;
+        } else if arg_str == "--resume" {
+            parsed.resume = true;
+        } else if arg_str == "--pages" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--pages'");
+                return Err(2);
+            }
+            let raw = args[i].to_string_lossy();
+            let parsed_range = match wordf::pages::PageRange::parse(&raw) {
+                Ok(pr) => pr,
+                Err(err_msg) => {
+                    eprintln!("Error: Invalid --pages specification: {}", err_msg);
+                    return Err(2);
+                }
+            };
+            parsed.pages = Some(parsed_range.pages);
+        } else if arg_str == "--password" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--password'");
+                return Err(2);
+            }
+            parsed.password = Some(args[i].to_string_lossy().to_string());
+        } else if arg_str == "--title" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--title'");
+                return Err(2);
+            }
+            parsed.metadata.title = Some(args[i].to_string_lossy().to_string());
+        } else if arg_str == "--author" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--author'");
+                return Err(2);
+            }
+            parsed.metadata.author = Some(args[i].to_string_lossy().to_string());
+        } else if arg_str == "--subject" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--subject'");
+                return Err(2);
+            }
+            parsed.metadata.subject = Some(args[i].to_string_lossy().to_string());
+        } else if arg_str == "--keywords" {
+            i += 1;
+            if i >= args.len() {
+                eprintln!("Error: Missing argument for '--keywords'");
+                return Err(2);
+            }
+            parsed.metadata.keywords = Some(args[i].to_string_lossy().to_string());
         } else if arg_str == "--report-json" {
             i += 1;
             if i >= args.len() {
@@ -118,7 +192,16 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
                 eprintln!("Error: Missing argument for '--font-path'");
                 return Err(2);
             }
-            parsed.font_path = Some(args[i].to_string_lossy().to_string());
+            let raw = args[i].to_string_lossy().to_string();
+            for part in raw.split(',') {
+                let trimmed = part.trim();
+                if !trimmed.is_empty() {
+                    parsed.font_paths.push(trimmed.to_string());
+                }
+            }
+            if parsed.font_path.is_none() {
+                parsed.font_path = parsed.font_paths.first().cloned();
+            }
         } else if arg_str == "-j" || arg_str == "--jobs" {
             i += 1;
             if i >= args.len() {
@@ -133,16 +216,18 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
                 }
             };
             parsed.jobs = Some(jobs_val);
+        } else if arg_str == "-r" || arg_str == "--recursive" {
+            parsed.recursive = true;
         } else if arg_str == "-q" || arg_str == "--quiet" {
             parsed.quiet = true;
         } else if arg_str == "-v" || arg_str == "--verbose" {
             parsed.verbose = true;
-        } else if arg_str.starts_with('-') {
+        } else if arg_str.starts_with('-') && arg_str != "-" {
             eprintln!("Error: Unknown or unsupported option '{}'", arg_str);
             return Err(2);
         } else {
-            if parsed.input_path.is_some() {
-                eprintln!("Error: Multiple inputs provided ('{:?}' and '{:?}'). WorDF processes exactly one target file or directory.", parsed.input_path.unwrap(), arg_str);
+            if let Some(ref existing) = parsed.input_path {
+                eprintln!("Error: Multiple inputs provided ('{:?}' and '{:?}'). WorDF processes exactly one target file or directory.", existing, arg_str);
                 return Err(2);
             }
             parsed.input_path = Some(PathBuf::from(&args[i]));
@@ -155,7 +240,7 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
         return Err(2);
     }
 
-    if parsed.output_pdf.is_none() {
+    if parsed.output_pdf.is_none() && !parsed.analyze {
         eprintln!("Error: Mandatory output path '-o <output.pdf>' is missing.");
         return Err(2);
     }
@@ -169,15 +254,5 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
 }
 
 pub fn map_conversion_error_to_exit_code(err: &ConversionErrorKind) -> i32 {
-    match err {
-        ConversionErrorKind::UnsupportedFormat => 3,
-        ConversionErrorKind::UnsupportedVersion => 3,
-        ConversionErrorKind::Encrypted => 3,
-        ConversionErrorKind::MissingFont => 3,
-        ConversionErrorKind::CorruptInput => 5,
-        ConversionErrorKind::ResourceLimit => 6,
-        ConversionErrorKind::BackendFailure => 8,
-        ConversionErrorKind::UnsupportedCapability => 3,
-        ConversionErrorKind::Internal => 8,
-    }
+    err.exit_code()
 }

@@ -115,8 +115,59 @@ pub fn count_cjk_in_xml_text_nodes(xml: &str) -> usize {
     count
 }
 
+/// Extracts the value of an XML attribute in `tag`, if present.
+pub fn extract_attribute_value<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
+    let bytes = tag.as_bytes();
+    let mut cursor = 0;
+
+    while let Some(rel_pos) = tag[cursor..].find(attr_name) {
+        let abs_pos = cursor + rel_pos;
+        let char_before_ok = abs_pos == 0 || matches!(bytes[abs_pos - 1], b' ' | b'\t' | b'\r' | b'\n');
+
+        if char_before_ok {
+            let mut check_pos = abs_pos + attr_name.len();
+            while check_pos < bytes.len() && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n') {
+                check_pos += 1;
+            }
+            if check_pos < bytes.len() && bytes[check_pos] == b'=' {
+                check_pos += 1;
+                while check_pos < bytes.len() && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n') {
+                    check_pos += 1;
+                }
+                if check_pos < bytes.len() && (bytes[check_pos] == b'"' || bytes[check_pos] == b'\'') {
+                    let quote_char = bytes[check_pos];
+                    let val_start = check_pos + 1;
+                    if let Some(val_end_rel) = tag[val_start..].find(quote_char as char) {
+                        return Some(&tag[val_start..val_start + val_end_rel]);
+                    }
+                }
+            }
+        }
+        cursor = abs_pos + attr_name.len();
+    }
+    None
+}
+
+/// Escapes string for safe inclusion in XML attribute values.
+pub fn escape_xml_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Updates an existing XML attribute or inserts it before the closing `>` or `/>`.
 pub fn update_or_insert_attribute(tag: &str, attr_name: &str, new_value: &str) -> String {
+    let escaped_val = escape_xml_attr(new_value);
+    let new_value = &escaped_val;
     let bytes = tag.as_bytes();
     let mut cursor = 0;
     let mut existing_val_span: Option<(usize, usize)> = None;
@@ -164,8 +215,8 @@ pub fn update_or_insert_attribute(tag: &str, attr_name: &str, new_value: &str) -
         res
     } else {
         let trimmed = tag.trim_end();
-        if trimmed.ends_with("/>") {
-            let prefix = trimmed[..trimmed.len() - 2].trim_end();
+        if let Some(stripped) = trimmed.strip_suffix("/>") {
+            let prefix = stripped.trim_end();
             let mut res = String::with_capacity(prefix.len() + attr_name.len() + new_value.len() + 6);
             res.push_str(prefix);
             res.push(' ');
@@ -174,8 +225,8 @@ pub fn update_or_insert_attribute(tag: &str, attr_name: &str, new_value: &str) -
             res.push_str(new_value);
             res.push_str("\"/>");
             res
-        } else if trimmed.ends_with('>') {
-            let prefix = trimmed[..trimmed.len() - 1].trim_end();
+        } else if let Some(stripped) = trimmed.strip_suffix('>') {
+            let prefix = stripped.trim_end();
             let mut res = String::with_capacity(prefix.len() + attr_name.len() + new_value.len() + 6);
             res.push_str(prefix);
             res.push(' ');

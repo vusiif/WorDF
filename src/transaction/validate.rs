@@ -25,63 +25,77 @@ pub struct ValidatedTargets {
 /// - Exit code 2: Parameter/alias conflict, same file entity, or non-existent target collision.
 /// - Exit code 4: File I/O, parent directory missing, symlink target rejected, or output exists without --overwrite.
 pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTargets, i32> {
-    // 1. Input file checks
     let input_path = &targets.input_path;
-    if input_path.as_os_str() == "-" {
-        eprintln!("Error: stdin input '-' is not supported by WorDF P1 contract.");
-        return Err(2);
-    }
+    let is_stdin = input_path.as_os_str() == "-";
 
-    let input_meta = match fs::symlink_metadata(input_path) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Error reading input file {:?}: {}", input_path, e);
+    // 1. Input file checks
+    if !is_stdin {
+        let input_meta = match fs::symlink_metadata(input_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("Error reading input file {:?}: {}", input_path, e);
+                return Err(4);
+            }
+        };
+
+        if !input_meta.is_file() {
+            eprintln!("Error: Input {:?} is not a regular file.", input_path);
             return Err(4);
         }
-    };
 
-    if !input_meta.is_file() {
-        eprintln!("Error: Input {:?} is not a regular file.", input_path);
-        return Err(4);
+        if input_meta.len() > crate::format::MAX_INPUT_BYTES as u64 {
+            eprintln!(
+                "Error: Input file {:?} size ({} bytes) exceeds maximum limit of {} bytes (128 MiB)",
+                input_path,
+                input_meta.len(),
+                crate::format::MAX_INPUT_BYTES
+            );
+            return Err(4);
+        }
     }
 
     let pdf_path = &targets.output_pdf_path;
+    let is_stdout = pdf_path.as_os_str() == "-";
 
     // 2. Immediate alias checks against input
-    if fs::metadata(pdf_path).is_ok() && is_same_file(pdf_path, input_path) {
-        eprintln!("Error: Output PDF {:?} points to the same file entity as input.", pdf_path);
-        return Err(2);
+    if !is_stdin && !is_stdout {
+        if fs::metadata(pdf_path).is_ok() && is_same_file(pdf_path, input_path) {
+            eprintln!("Error: Output PDF {:?} points to the same file entity as input.", pdf_path);
+            return Err(2);
+        }
+        check_future_target_alias(pdf_path, input_path, "PDF output", "input file")?;
     }
-    check_future_target_alias(pdf_path, input_path, "PDF output", "input file")?;
 
     // 3. Report alias checks against input & PDF
     if let Some(ref report_path) = targets.report_json_path {
-        if fs::metadata(report_path).is_ok() && is_same_file(report_path, input_path) {
-            eprintln!("Error: JSON report {:?} points to the same file entity as input.", report_path);
+        if report_path.as_os_str() == "-" {
+            eprintln!("Error: stdout report '-' is not supported by WorDF contract.");
             return Err(2);
         }
-        check_future_target_alias(report_path, input_path, "JSON report", "input file")?;
+        if !is_stdin {
+            if fs::metadata(report_path).is_ok() && is_same_file(report_path, input_path) {
+                eprintln!("Error: JSON report {:?} points to the same file entity as input.", report_path);
+                return Err(2);
+            }
+            check_future_target_alias(report_path, input_path, "JSON report", "input file")?;
+        }
 
-        if is_same_file(pdf_path, report_path) {
-            eprintln!("Error: Output PDF and JSON report point to the same existing file entity.");
-            return Err(2);
+        if !is_stdout {
+            if is_same_file(pdf_path, report_path) {
+                eprintln!("Error: Output PDF and JSON report point to the same existing file entity.");
+                return Err(2);
+            }
+            check_future_target_alias(pdf_path, report_path, "PDF output", "JSON report")?;
         }
-        check_future_target_alias(pdf_path, report_path, "PDF output", "JSON report")?;
     }
 
     // 4. Output PDF structure & existence checks
-    if pdf_path.as_os_str() == "-" {
-        eprintln!("Error: stdout output '-' is not supported by WorDF P1 contract.");
-        return Err(2);
+    if !is_stdout {
+        validate_single_output_target(pdf_path, targets.overwrite, "PDF output")?;
     }
-    validate_single_output_target(pdf_path, targets.overwrite, "PDF output")?;
 
     // 5. Report JSON structure & existence checks (if provided)
     if let Some(ref report_path) = targets.report_json_path {
-        if report_path.as_os_str() == "-" {
-            eprintln!("Error: stdout report '-' is not supported by WorDF P1 contract.");
-            return Err(2);
-        }
         validate_single_output_target(report_path, targets.overwrite, "JSON report")?;
     }
 

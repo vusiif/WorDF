@@ -65,6 +65,10 @@ pub fn convert_route_b_doc_bridge_with_font_bytes(
         fallback_font_name: fallback_font.map(|s| s.to_string()),
         fallback_font_bytes: fallback_font_bytes.map(|b| b.to_vec()),
         available_font_names: available_fonts.to_vec(),
+        fallback_chain: None,
+        pages: None,
+        password: None,
+        metadata: None,
     };
     convert_doc_route_b_compat(bytes, &opts)
 }
@@ -92,6 +96,10 @@ pub fn convert_route_c_docx_docxide_with_font_bytes(
         fallback_font_name: fallback_font.map(|s| s.to_string()),
         fallback_font_bytes: fallback_font_bytes.map(|b| b.to_vec()),
         available_font_names: available_fonts.to_vec(),
+        fallback_chain: None,
+        pages: None,
+        password: None,
+        metadata: None,
     };
     convert_docx_route_c_compat(bytes, &opts)
 }

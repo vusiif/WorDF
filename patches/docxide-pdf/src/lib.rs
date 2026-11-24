@@ -33,7 +33,16 @@ pub fn convert_docx_bytes_to_pdf_bytes(input: &[u8]) -> Result<Vec<u8>, Error> {
 /// For callers that require the actual positive page count directly from the layout assembly.
 pub fn convert_docx_bytes_to_pdf_bytes_with_page_count(input: &[u8]) -> Result<(Vec<u8>, usize), Error> {
     reject_old_env_vars()?;
-    pdf::render_with_page_count(&docx::parse_bytes(input)?)
+    pdf::render_with_page_filter(&docx::parse_bytes(input)?, None)
+}
+
+/// For callers that optionally slice and export a specific subset of 0-based page indices.
+pub fn convert_docx_bytes_to_pdf_bytes_with_page_filter(
+    input: &[u8],
+    page_filter: Option<&[usize]>,
+) -> Result<(Vec<u8>, usize), Error> {
+    reject_old_env_vars()?;
+    pdf::render_with_page_filter(&docx::parse_bytes(input)?, page_filter)
 }
 
 /// The variables lost their old `DOCXSIDE_` prefix; failing loudly beats silently

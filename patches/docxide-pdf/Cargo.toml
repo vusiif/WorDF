@@ -107,6 +107,8 @@ version = "0.1.5"
 
 [dependencies.zip]
 version = "8.1.0"
+default-features = false
+features = ["deflate"]
 
 [dev-dependencies.env_logger]
 version = "0.11"

@@ -103,6 +103,18 @@ fn xmp_packet(doc: &Document, lang: &str, claims_ua: bool) -> String {
             esc(a)
         );
     }
+    if let Some(s) = &doc.subject {
+        props += &format!(
+            "<dc:description><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></dc:description>",
+            esc(s)
+        );
+    }
+    if let Some(k) = &doc.keywords {
+        props += &format!(
+            "<pdf:Keywords>{}</pdf:Keywords>",
+            esc(k)
+        );
+    }
     if claims_ua {
         props += "<pdfuaid:part>1</pdfuaid:part>";
     }

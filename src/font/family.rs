@@ -10,7 +10,8 @@ pub fn extract_font_family_names(bytes: &[u8]) -> Vec<String> {
 
     let font_offsets: Vec<usize> = if bytes.starts_with(b"ttcf") {
         let num_fonts = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
-        let mut offsets = Vec::with_capacity(num_fonts);
+        let max_possible = bytes.len().saturating_sub(12) / 4;
+        let mut offsets = Vec::with_capacity(num_fonts.min(max_possible));
         for i in 0..num_fonts {
             let entry = 12 + i * 4;
             if entry + 4 > bytes.len() {
@@ -83,9 +84,10 @@ pub fn extract_font_family_names(bytes: &[u8]) -> Vec<String> {
                     let str_bytes = &bytes[str_pos..str_end];
                     if pid == 3 || pid == 0 {
                         // UTF-16BE
-                        let utf16: Vec<u16> = str_bytes
-                            .chunks_exact(2)
-                            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                        let (chunks, _) = str_bytes.as_chunks::<2>();
+                        let utf16: Vec<u16> = chunks
+                            .iter()
+                            .map(|&[b0, b1]| u16::from_be_bytes([b0, b1]))
                             .collect();
                         if let Ok(s) = String::from_utf16(&utf16) {
                             if !s.trim().is_empty() && !names.contains(&s) {

@@ -113,6 +113,7 @@ pub fn atomic_commit_rename(old_path: &Path, new_path: &Path, overwrite: bool) -
                 Err(io::Error::last_os_error())
             }
         } else {
+            #[cfg(target_os = "linux")]
             let ret = unsafe {
                 libc::renameat2(
                     libc::AT_FDCWD,
@@ -122,6 +123,27 @@ pub fn atomic_commit_rename(old_path: &Path, new_path: &Path, overwrite: bool) -
                     libc::RENAME_NOREPLACE,
                 )
             };
+
+            #[cfg(target_os = "macos")]
+            let ret = unsafe {
+                libc::renamex_np(
+                    old_c.as_ptr(),
+                    new_c.as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            };
+
+            #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+            let ret = {
+                if new_path.exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "destination already exists",
+                    ));
+                }
+                unsafe { libc::rename(old_c.as_ptr(), new_c.as_ptr()) }
+            };
+
             if ret == 0 {
                 Ok(())
             } else {

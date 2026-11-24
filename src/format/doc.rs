@@ -18,6 +18,7 @@ pub fn validate_doc_package(bytes: &[u8]) -> Result<(), ConversionError> {
 
     let mut stream_count = 0;
     let mut has_word_document = false;
+    let mut has_encrypted_stream = false;
 
     for entry in comp.walk() {
         stream_count += 1;
@@ -30,9 +31,21 @@ pub fn validate_doc_package(bytes: &[u8]) -> Result<(), ConversionError> {
                 ),
             });
         }
-        if entry.is_stream() && entry.name() == "WordDocument" {
-            has_word_document = true;
+        if entry.is_stream() {
+            let name = entry.name();
+            if name == "WordDocument" {
+                has_word_document = true;
+            } else if name == "EncryptedPackage" || name == "EncryptionInfo" {
+                has_encrypted_stream = true;
+            }
         }
+    }
+
+    if has_encrypted_stream {
+        return Err(ConversionError {
+            kind: ConversionErrorKind::Encrypted,
+            message: "CFB container contains 'EncryptedPackage'/'EncryptionInfo' stream (encrypted / password-protected Office document)".to_string(),
+        });
     }
 
     if !has_word_document {

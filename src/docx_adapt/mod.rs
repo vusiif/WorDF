@@ -10,6 +10,7 @@ pub use xml::{
     adapt_run_xml, adapt_xml_text, count_cjk_in_xml_text_nodes, for_each_xml_text_node,
     is_text_part,
 };
+pub use xml_util::extract_attribute_value;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -61,13 +62,22 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
             message: format!("Corrupt zip entry: {}", e),
         })?;
         let name = file.name().to_string();
+        let uncompressed_size = file.size() as usize;
 
         if is_text_part(&name) {
-            let mut xml_content = String::new();
-            file.read_to_string(&mut xml_content).map_err(|e| ConversionError {
+            let max_bytes = crate::format::docx::MAX_DOCX_MAIN_XML_BYTES;
+            let mut xml_content = String::with_capacity(uncompressed_size.min(max_bytes as usize));
+            let mut handle = (&mut file).take(max_bytes + 1);
+            handle.read_to_string(&mut xml_content).map_err(|e| ConversionError {
                 kind: ConversionErrorKind::CorruptInput,
                 message: format!("Failed to read XML text part '{}': {}", name, e),
             })?;
+            if xml_content.len() as u64 > max_bytes {
+                return Err(ConversionError {
+                    kind: ConversionErrorKind::ResourceLimit,
+                    message: format!("XML text part '{}' decompressed size exceeds limit", name),
+                });
+            }
 
             // Glyph coverage fail-fast check
             if let (Some(cmap), Some(f_bytes)) = (&font_cmap, fallback_font_bytes) {
@@ -75,10 +85,8 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                 let mut checked_chars = HashSet::new();
                 for_each_xml_text_node(&xml_content, |text| {
                     for c in text.chars() {
-                        if is_cjk_char(c) && checked_chars.insert(c) {
-                            if !cmap.has_glyph(c, f_bytes) {
-                                missing_chars.push(c);
-                            }
+                        if is_cjk_char(c) && checked_chars.insert(c) && !cmap.has_glyph(c, f_bytes) {
+                            missing_chars.push(c);
                         }
                     }
                 });
@@ -105,20 +113,22 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                 let (adapted_xml, cjk_count) = adapt_xml_text(&xml_content, fb, available_fonts);
                 total_cjk_in_package += cjk_count;
 
-                let options = SimpleFileOptions::default()
-                    .compression_method(file.compression())
-                    .unix_permissions(file.unix_mode().unwrap_or(0o644));
+                if adapted_xml != xml_content {
+                    let options = SimpleFileOptions::default()
+                        .compression_method(file.compression())
+                        .unix_permissions(file.unix_mode().unwrap_or(0o644));
 
-                writer.start_file(&name, options).map_err(|e| ConversionError {
-                    kind: ConversionErrorKind::Internal,
-                    message: format!("Failed to write adapted zip entry '{}': {}", name, e),
-                })?;
-                writer.write_all(adapted_xml.as_bytes()).map_err(|e| ConversionError {
-                    kind: ConversionErrorKind::Internal,
-                    message: format!("Failed to write data for '{}': {}", name, e),
-                })?;
-                modified_entries += 1;
-                continue;
+                    writer.start_file(&name, options).map_err(|e| ConversionError {
+                        kind: ConversionErrorKind::Internal,
+                        message: format!("Failed to write adapted zip entry '{}': {}", name, e),
+                    })?;
+                    writer.write_all(adapted_xml.as_bytes()).map_err(|e| ConversionError {
+                        kind: ConversionErrorKind::Internal,
+                        message: format!("Failed to write data for '{}': {}", name, e),
+                    })?;
+                    modified_entries += 1;
+                    continue;
+                }
             } else {
                 total_cjk_in_package += count_cjk_in_xml_text_nodes(&xml_content);
             }
@@ -126,8 +136,10 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
 
         if is_styles_part(&name) {
             if let Some(fb) = fallback_font {
-                let mut xml_content = String::new();
-                if file.read_to_string(&mut xml_content).is_ok() {
+                let max_bytes = crate::format::docx::MAX_DOCX_AUX_XML_BYTES;
+                let mut xml_content = String::with_capacity(uncompressed_size.min(max_bytes as usize));
+                let mut handle = (&mut file).take(max_bytes + 1);
+                if handle.read_to_string(&mut xml_content).is_ok() && xml_content.len() as u64 <= max_bytes {
                     let adapted_styles = adapt_styles_xml(&xml_content, fb, available_fonts);
                     if adapted_styles != xml_content {
                         let options = SimpleFileOptions::default()

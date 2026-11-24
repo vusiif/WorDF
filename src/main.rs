@@ -10,14 +10,15 @@ use std::process;
 use std::time::Instant;
 
 use cli::{
-    inspect_fonts, map_conversion_error_to_exit_code, parse_cli_args, run_batch_conversion,
-    BatchConfig, TOOL_NAME, TOOL_VERSION,
+    inspect_font_chain, map_conversion_error_to_exit_code, parse_cli_args, run_batch_conversion,
+    run_single_conversion, BatchConfig, SingleConfig,
 };
-use wordf::report::{format_schema_v1_json, ReportData};
+use wordf::analyze_document;
+use wordf::report::format_analysis_json;
 use wordf::transaction::{
-    commit_two_phase, create_exclusive_temp_file, validate_and_isolate_targets, TargetPaths,
+    atomic_commit_rename, create_exclusive_temp_file, validate_and_isolate_targets, TargetPaths,
 };
-use wordf::{convert, ConversionOptions, Diagnostic};
+use wordf::{ConversionOptions, Diagnostic};
 
 fn main() {
     let t_start = Instant::now();
@@ -28,18 +29,20 @@ fn main() {
     };
 
     let input_path = args.input_path.unwrap();
-    let output_path = args.output_pdf.unwrap();
 
-    // Font discovery
-    let discovered_fonts = inspect_fonts(args.font_path.as_ref());
+    // Font discovery & multi-tiered fallback chain
+    let discovered_fonts = match inspect_font_chain(&args.font_paths) {
+        Ok(df) => df,
+        Err(code) => process::exit(code),
+    };
     if let Some(ref dir) = discovered_fonts.font_dir {
-        if args.font_path.is_some() || env::var("DOCXIDE_FONTS").is_err() {
+        if !args.font_paths.is_empty() || env::var("DOCXIDE_FONTS").is_err() {
             env::set_var("DOCXIDE_FONTS", dir);
         }
     }
 
     let (fallback_name, fallback_bytes, font_policy) = if let Some(ref fb) = discovered_fonts.primary_cjk_fallback {
-        let policy = if args.font_path.is_some() {
+        let policy = if !args.font_paths.is_empty() {
             "explicit-font-path"
         } else {
             "env-docxide-fonts"
@@ -55,10 +58,22 @@ fn main() {
         (None, None, "system-offline-no-embedded")
     };
 
-    let mut available_names = discovered_fonts.family_names;
+    let mut available_names = discovered_fonts.family_names.clone();
     for name in wordf::embedded_cjk_font_names() {
         if !available_names.contains(&name) {
             available_names.push(name);
+        }
+    }
+
+    let mut fallback_chain = discovered_fonts.fallback_chain.clone();
+    if fallback_chain.is_empty() && args.font_paths.is_empty() && wordf::font::has_embedded_cjk_font() {
+        let b = wordf::font::embedded_cjk_font_bytes();
+        if let Some(cmap) = wordf::font::get_or_init_embedded_font_cmap(b).cloned() {
+            fallback_chain.push_with_cmap(
+                wordf::EMBEDDED_CJK_FONT_NAME.to_string(),
+                b.to_vec(),
+                cmap,
+            );
         }
     }
 
@@ -67,15 +82,156 @@ fn main() {
         fallback_font_name: fallback_name,
         fallback_font_bytes: fallback_bytes,
         available_font_names: available_names,
+        fallback_chain: (!fallback_chain.is_empty()).then_some(fallback_chain),
+        pages: args.pages.clone(),
+        password: args.password.clone(),
+        metadata: (!args.metadata.is_empty()).then_some(args.metadata.clone()),
+    };
+
+    // Route: Document Analysis Pre-flight Mode
+    if args.analyze {
+        let is_stdin = input_path.as_os_str() == "-";
+        if !is_stdin && !input_path.exists() {
+            eprintln!("Error: Input file {:?} does not exist.", input_path);
+            process::exit(4);
+        }
+        if !is_stdin && input_path.is_dir() {
+            eprintln!("Error: --analyze mode does not support directory inputs. Please specify a single document.");
+            process::exit(2);
+        }
+
+        let input_bytes = if is_stdin {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut handle = std::io::stdin().take(wordf::format::MAX_INPUT_BYTES as u64 + 1);
+            if let Err(e) = handle.read_to_end(&mut buf) {
+                eprintln!("Error reading input from stdin: {}", e);
+                process::exit(4);
+            }
+            if buf.len() > wordf::format::MAX_INPUT_BYTES {
+                eprintln!(
+                    "Error: Input from stdin exceeds maximum limit of {} bytes (128 MiB)",
+                    wordf::format::MAX_INPUT_BYTES
+                );
+                process::exit(6);
+            }
+            buf
+        } else {
+            let in_meta = match input_path.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error reading metadata for {:?}: {}", input_path, e);
+                    process::exit(4);
+                }
+            };
+            if in_meta.len() > wordf::format::MAX_INPUT_BYTES as u64 {
+                eprintln!(
+                    "Error: Input file {:?} size ({} bytes) exceeds maximum limit of {} bytes (128 MiB)",
+                    input_path,
+                    in_meta.len(),
+                    wordf::format::MAX_INPUT_BYTES
+                );
+                process::exit(6);
+            }
+            match fs::read(&input_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("Error reading input file {:?}: {}", input_path, e);
+                    process::exit(4);
+                }
+            }
+        };
+
+        let mut analysis = match analyze_document(&input_bytes, &options) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Error during document analysis: {}", e);
+                process::exit(map_conversion_error_to_exit_code(&e.kind));
+            }
+        };
+
+        // Container extension mismatch check
+        let ext_lower = input_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        let is_doc = input_bytes.starts_with(&wordf::format::DOC_MAGIC);
+        let is_docx = input_bytes.starts_with(&wordf::format::ZIP_MAGIC);
+        if is_docx && ext_lower == "doc" {
+            analysis.warnings.push(Diagnostic {
+                code: "input.extension_mismatch".to_string(),
+                message: "Input file extension '.doc' does not match verified container format 'docx'".to_string(),
+            });
+        } else if is_doc && ext_lower == "docx" {
+            analysis.warnings.push(Diagnostic {
+                code: "input.extension_mismatch".to_string(),
+                message: "Input file extension '.docx' does not match verified container format 'doc'".to_string(),
+            });
+        }
+
+        if !args.quiet {
+            print!("{}", analysis.render_console_summary(input_path.to_string_lossy().as_ref()));
+        }
+
+        if let Some(ref rep_path) = args.report_json {
+            let json_str = format_analysis_json(&analysis);
+            let mut rep_guard = match create_exclusive_temp_file(rep_path, "rep") {
+                Ok(g) => g,
+                Err(code) => process::exit(code),
+            };
+            if let Err(e) = rep_guard.file.write_all(json_str.as_bytes()) {
+                rep_guard.cleanup();
+                eprintln!("Error writing analysis JSON report: {}", e);
+                process::exit(4);
+            }
+            if let Err(e) = rep_guard.file.flush() {
+                rep_guard.cleanup();
+                eprintln!("Error flushing analysis JSON report: {}", e);
+                process::exit(4);
+            }
+            if let Err(e) = atomic_commit_rename(&rep_guard.path, rep_path, args.overwrite) {
+                rep_guard.cleanup();
+                eprintln!("Error committing analysis JSON report: {}", e);
+                process::exit(4);
+            }
+            rep_guard.committed = true;
+        }
+
+        if args.strict && !analysis.warnings.is_empty() {
+            eprintln!(
+                "Strict mode failure: {} warning(s) detected during document analysis.",
+                analysis.warnings.len()
+            );
+            process::exit(3);
+        }
+
+        process::exit(0);
+    }
+
+    let output_path = match args.output_pdf {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: Output path is required (e.g. -o output.pdf)");
+            process::exit(2);
+        }
     };
 
     // Route: Directory Batch Conversion
     if input_path.is_dir() {
+        if output_path.as_os_str() == "-" {
+            eprintln!("Error: Cannot output to stdout '-' in batch directory mode.");
+            process::exit(2);
+        }
         let batch_config = BatchConfig {
             input_dir: input_path,
             output_dir: output_path,
+            report_json: args.report_json,
             options,
             overwrite: args.overwrite,
+            recursive: args.recursive,
+            strict: args.strict,
+            resume: args.resume,
             jobs: args.jobs,
             quiet: args.quiet,
             verbose: args.verbose,
@@ -86,12 +242,30 @@ fn main() {
         }
     }
 
+    let is_streaming = input_path.as_os_str() == "-" || output_path.as_os_str() == "-";
+    let mut effective_overwrite = args.overwrite;
+    if args.resume && !is_streaming && output_path.exists() {
+        let in_mtime = input_path.metadata().and_then(|m| m.modified()).ok();
+        let out_mtime = output_path.metadata().and_then(|m| m.modified()).ok();
+        if matches!((in_mtime, out_mtime), (Some(in_t), Some(out_t)) if out_t >= in_t) {
+            if !args.quiet {
+                eprintln!(
+                    "WorDF: Output {:?} is up-to-date with input {:?}. Skipping conversion (--resume).",
+                    output_path, input_path
+                );
+            }
+            process::exit(0);
+        } else {
+            effective_overwrite = true;
+        }
+    }
+
     // Route: Single File Conversion
     let target_paths = TargetPaths {
         input_path,
         output_pdf_path: output_path,
         report_json_path: args.report_json,
-        overwrite: args.overwrite,
+        overwrite: effective_overwrite,
     };
 
     let validated = match validate_and_isolate_targets(target_paths) {
@@ -99,191 +273,16 @@ fn main() {
         Err(code) => process::exit(code),
     };
 
-    let input_bytes = match fs::read(&validated.input_canonical) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("Error reading input file {:?}: {}", validated.input_canonical, e);
-            process::exit(4);
-        }
+    let single_config = SingleConfig {
+        validated: &validated,
+        options: &options,
+        discovered_fonts: &discovered_fonts,
+        font_policy,
+        strict: args.strict,
+        quiet: args.quiet,
+        verbose: args.verbose,
+        t_start,
     };
 
-    if args.verbose {
-        eprintln!(
-            "[verbose] Reading input file: {:?} ({} bytes)",
-            validated.input_canonical,
-            input_bytes.len()
-        );
-        eprintln!(
-            "[verbose] Font discovery policy: {}, fallback: {:?}, available font families: {}",
-            font_policy,
-            options.fallback_font_name,
-            options.available_font_names.len()
-        );
-    }
-
-    // Check extension mismatch diagnostic
-    let mut cli_diagnostics = Vec::new();
-    let ext_lower = validated
-        .input_canonical
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_lowercase())
-        .unwrap_or_default();
-
-    let t_conv_start = Instant::now();
-    let conv_res = convert(&input_bytes, &options);
-    let conversion_ms = t_conv_start.elapsed().as_secs_f64() * 1000.0;
-
-    let output = match conv_res {
-        Ok(out) => out,
-        Err(e) => {
-            eprintln!("Error during conversion: {}", e);
-            let code = map_conversion_error_to_exit_code(&e.kind);
-            process::exit(code);
-        }
-    };
-
-    if args.verbose {
-        eprintln!(
-            "[verbose] Converted document in {:.2}ms ({} pages, {} bytes PDF)",
-            conversion_ms,
-            output.page_count,
-            output.pdf.len()
-        );
-    }
-
-    let is_doc = input_bytes.starts_with(&wordf::format::DOC_MAGIC);
-    let is_docx = input_bytes.starts_with(&wordf::format::ZIP_MAGIC);
-    if is_docx && ext_lower == "doc" {
-        cli_diagnostics.push(Diagnostic {
-            code: "input.extension_mismatch".to_string(),
-            message: "Input file extension '.doc' does not match verified container format 'docx'".to_string(),
-        });
-    } else if is_doc && ext_lower == "docx" {
-        cli_diagnostics.push(Diagnostic {
-            code: "input.extension_mismatch".to_string(),
-            message: "Input file extension '.docx' does not match verified container format 'doc'".to_string(),
-        });
-    }
-
-    let mut all_warnings = output.warnings;
-    if !cli_diagnostics.is_empty() {
-        cli_diagnostics.extend(all_warnings);
-        all_warnings = cli_diagnostics;
-    }
-
-    if !args.quiet && !all_warnings.is_empty() {
-        eprintln!("Diagnostics & warnings encountered ({}):", all_warnings.len());
-        for w in &all_warnings {
-            eprintln!("  [{}] {}", w.code, w.message);
-        }
-    }
-
-    // Two-phase commit
-    let mut pdf_guard = match create_exclusive_temp_file(&validated.output_pdf_path, "pdf") {
-        Ok(g) => g,
-        Err(code) => process::exit(code),
-    };
-
-    if let Err(e) = pdf_guard.file.write_all(&output.pdf) {
-        eprintln!("Error writing PDF data to temporary file {:?}: {}", pdf_guard.path, e);
-        pdf_guard.cleanup();
-        process::exit(4);
-    }
-    if let Err(e) = pdf_guard.file.flush() {
-        eprintln!("Error flushing PDF data to temporary file: {}", e);
-        pdf_guard.cleanup();
-        process::exit(4);
-    }
-
-    let mut report_guard = if validated.report_json_path.is_some() {
-        let rep_path = validated.report_json_path.as_ref().unwrap();
-        match create_exclusive_temp_file(rep_path, "rep") {
-            Ok(g) => Some(g),
-            Err(code) => {
-                pdf_guard.cleanup();
-                process::exit(code);
-            }
-        }
-    } else {
-        None
-    };
-
-    if let Some(ref mut r_guard) = report_guard {
-        let pre_report_ms = t_start.elapsed().as_secs_f64() * 1000.0;
-        let actual_fmt_str = if is_doc {
-            "doc"
-        } else if is_docx {
-            "docx"
-        } else {
-            "unknown"
-        };
-        let (backend_name, backend_ver) = if is_doc {
-            ("rwml+docxide-pdf", "0.1.4+0.19.0")
-        } else {
-            ("docxide-pdf", "0.19.0")
-        };
-        let fallback_used = all_warnings.iter().any(|w| w.code == "font.fallback")
-            || discovered_fonts.primary_cjk_fallback.is_some();
-
-        let rep_data = ReportData {
-            tool_name: TOOL_NAME,
-            tool_version: TOOL_VERSION,
-            input_format: actual_fmt_str,
-            input_bytes: input_bytes.len(),
-            backend_name,
-            backend_version: backend_ver,
-            conversion_status: if all_warnings.is_empty() {
-                "success"
-            } else {
-                "success_with_warnings"
-            },
-            delivery_status: "committed",
-            pdf_bytes: output.pdf.len(),
-            pdf_page_count: output.page_count,
-            warnings: &all_warnings,
-            conversion_ms,
-            pre_report_ms,
-            font_policy,
-            fallback_used,
-        };
-
-        let json_text = format_schema_v1_json(&rep_data);
-        if let Err(e) = r_guard.file.write_all(json_text.as_bytes()) {
-            eprintln!("Error writing JSON report to temporary file: {}", e);
-            pdf_guard.cleanup();
-            r_guard.cleanup();
-            process::exit(4);
-        }
-        if let Err(e) = r_guard.file.flush() {
-            eprintln!("Error flushing JSON report to temporary file: {}", e);
-            pdf_guard.cleanup();
-            r_guard.cleanup();
-            process::exit(4);
-        }
-    }
-
-    let commit_res = commit_two_phase(
-        &mut pdf_guard,
-        &validated.output_pdf_path,
-        report_guard.as_mut(),
-        validated.report_json_path.as_deref(),
-        validated.overwrite,
-    );
-
-    match commit_res {
-        Ok(()) => {
-            if args.verbose {
-                eprintln!(
-                    "[verbose] Committed PDF to {:?} (total elapsed: {:.2}ms)",
-                    validated.output_pdf_path,
-                    t_start.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-            process::exit(0)
-        }
-        Err(code) => {
-            process::exit(code);
-        }
-    }
+    run_single_conversion(&single_config);
 }

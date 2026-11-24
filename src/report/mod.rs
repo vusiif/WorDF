@@ -2,6 +2,12 @@
 //! Implements deterministic UTF-8 manual formatting without external serde_json dependency.
 //! License: GPL-3.0-or-later
 
+pub mod analyze;
+pub mod batch;
+
+pub use analyze::format_analysis_json;
+pub use batch::{format_batch_report_json, BatchItemReport, BatchReportData};
+
 use crate::Diagnostic;
 
 pub struct ReportData<'a> {
@@ -116,3 +122,6 @@ pub fn format_schema_v1_json(data: &ReportData) -> String {
         if data.fallback_used { "true" } else { "false" }
     )
 }
+
+#[cfg(test)]
+mod tests;

@@ -39,7 +39,7 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
     let mut total_uncompressed: u64 = 0;
 
     for i in 0..entry_count {
-        let file = archive.by_index(i).map_err(|e| ConversionError {
+        let mut file = archive.by_index(i).map_err(|e| ConversionError {
             kind: ConversionErrorKind::CorruptInput,
             message: format!("Corrupted entry header in DOCX ZIP: {}", e),
         })?;
@@ -115,6 +115,36 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
                     ),
                 });
             }
+            // Buffer at most 64 KiB to determine dimensions, preventing large image memory spikes
+            let mut img_header = Vec::new();
+            if file.by_ref().take(65536).read_to_end(&mut img_header).is_ok() {
+                let size_opt = imagesize::blob_size(&img_header).or_else(|_| {
+                    let _ = file.read_to_end(&mut img_header);
+                    imagesize::blob_size(&img_header)
+                });
+
+                if let Ok(size) = size_opt {
+                    if size.width > MAX_IMAGE_DIMENSION || size.height > MAX_IMAGE_DIMENSION {
+                        return Err(ConversionError {
+                            kind: ConversionErrorKind::ResourceLimit,
+                            message: format!(
+                                "Image '{}' dimensions {}x{} exceed maximum allowed single-dimension limit of {}px",
+                                name, size.width, size.height, MAX_IMAGE_DIMENSION
+                            ),
+                        });
+                    }
+                    let pixels = size.width.saturating_mul(size.height);
+                    if pixels > MAX_IMAGE_PIXELS {
+                        return Err(ConversionError {
+                            kind: ConversionErrorKind::ResourceLimit,
+                            message: format!(
+                                "Image '{}' total pixels {} exceed maximum allowed limit of {}px",
+                                name, pixels, MAX_IMAGE_PIXELS
+                            ),
+                        });
+                    }
+                }
+            }
         }
 
         // Compression ratio check for zip bombs
@@ -151,48 +181,6 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
             kind: ConversionErrorKind::CorruptInput,
             message: "Missing 'word/_rels/document.xml.rels' or package relationships in DOCX package".to_string(),
         });
-    }
-
-    // Inspect image dimensions for media entries
-    for i in 0..entry_count {
-        let mut file = match archive.by_index(i) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let name = file.name().to_string();
-        if name.starts_with("word/media/") {
-            // Buffer at most 64 KiB to determine dimensions, preventing large image memory spikes
-            let mut img_header = Vec::new();
-            if file.by_ref().take(65536).read_to_end(&mut img_header).is_ok() {
-                let size_opt = imagesize::blob_size(&img_header).or_else(|_| {
-                    // Fallback to remaining content if 64 KiB wasn't enough (e.g. metadata heavy images)
-                    let _ = file.read_to_end(&mut img_header);
-                    imagesize::blob_size(&img_header)
-                });
-
-                if let Ok(size) = size_opt {
-                    if size.width > MAX_IMAGE_DIMENSION || size.height > MAX_IMAGE_DIMENSION {
-                        return Err(ConversionError {
-                            kind: ConversionErrorKind::ResourceLimit,
-                            message: format!(
-                                "Image '{}' dimensions {}x{} exceed maximum allowed single-dimension limit of {}px",
-                                name, size.width, size.height, MAX_IMAGE_DIMENSION
-                            ),
-                        });
-                    }
-                    let pixels = size.width.saturating_mul(size.height);
-                    if pixels > MAX_IMAGE_PIXELS {
-                        return Err(ConversionError {
-                            kind: ConversionErrorKind::ResourceLimit,
-                            message: format!(
-                                "Image '{}' total pixels {} exceed maximum allowed limit of {}px",
-                                name, pixels, MAX_IMAGE_PIXELS
-                            ),
-                        });
-                    }
-                }
-            }
-        }
     }
 
     Ok(())

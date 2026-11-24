@@ -8,6 +8,12 @@ pub fn convert_doc_route_b(
     bytes: &[u8],
     options: &ConversionOptions,
 ) -> Result<ConversionOutput, ConversionError> {
+    let doc_meta = crate::metadata::doc::extract_doc_metadata(bytes);
+    let merged_meta = match &options.metadata {
+        Some(overrides) => doc_meta.merge_with_overrides(overrides),
+        None => doc_meta,
+    };
+
     let document = rwml::Document::open(bytes).map_err(|e| ConversionError {
         kind: ConversionErrorKind::CorruptInput,
         message: format!("rwml DOC open error: {:?}", e),
@@ -18,7 +24,14 @@ pub fn convert_doc_route_b(
         message: format!("rwml DOCX bridge export error: {:?}", e),
     })?;
 
-    let mut output = convert_docx_route_c(&docx_bytes, options)?;
+    let mut opts_with_meta = options.clone();
+    opts_with_meta.metadata = if merged_meta.is_empty() {
+        None
+    } else {
+        Some(merged_meta)
+    };
+
+    let mut output = convert_docx_route_c(&docx_bytes, &opts_with_meta)?;
 
     output.warnings.insert(
         0,
@@ -93,13 +106,31 @@ pub fn convert_docx_route_c(
         });
     }
 
-    let (pdf_bytes, raw_page_count) =
-        docxide_pdf::convert_docx_bytes_to_pdf_bytes_with_page_count(&adapted_docx).map_err(
-            |e| ConversionError {
+    let final_docx = match &options.metadata {
+        Some(meta) if !meta.is_empty() => {
+            crate::metadata::docx::inject_docx_metadata(&adapted_docx, meta)?
+        }
+        _ => adapted_docx.into_owned(),
+    };
+
+    let (pdf_bytes, raw_page_count) = docxide_pdf::convert_docx_bytes_to_pdf_bytes_with_page_filter(
+        &final_docx,
+        options.pages.as_deref(),
+    )
+    .map_err(|e| {
+        let msg = format!("docxide-pdf render error: {:?}", e);
+        if msg.contains("out of range") {
+            ConversionError {
+                kind: ConversionErrorKind::PageOutOfRange,
+                message: msg,
+            }
+        } else {
+            ConversionError {
                 kind: ConversionErrorKind::BackendFailure,
-                message: format!("docxide-pdf render error: {:?}", e),
-            },
-        )?;
+                message: msg,
+            }
+        }
+    })?;
 
     if raw_page_count == 0 {
         return Err(ConversionError {

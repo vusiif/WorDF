@@ -5,7 +5,7 @@
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -733,6 +733,831 @@ fn test_case_19_batch_directory_conversion_scoped_concurrency() {
     let stderr_str = String::from_utf8_lossy(&output.stderr);
     assert!(stderr_str.contains("[verbose] Discovered 3 documents"));
     assert!(stderr_str.contains("Batch conversion complete. Total: 3, Succeeded: 3"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_20_batch_directory_conversion_report_json() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case20_batch_report");
+    let in_dir = dir.join("inputs");
+    let out_dir = dir.join("outputs");
+    let report_json = dir.join("batch_summary.json");
+    fs::create_dir_all(&in_dir).unwrap();
+
+    fs::write(in_dir.join("alpha.docx"), make_test_docx("Alpha content")).unwrap();
+    fs::write(in_dir.join("beta.docx"), make_test_docx("Beta content")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--report-json")
+        .arg(&report_json)
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(0), "Batch conversion must succeed");
+    assert!(out_dir.join("alpha.pdf").exists(), "alpha.pdf must exist");
+    assert!(out_dir.join("beta.pdf").exists(), "beta.pdf must exist");
+    assert!(report_json.exists(), "batch_summary.json must be generated");
+
+    let report_content = fs::read_to_string(&report_json).unwrap();
+    assert!(report_content.contains(r#""mode": "batch""#));
+    assert!(report_content.contains(r#""total": 2"#));
+    assert!(report_content.contains(r#""succeeded": 2"#));
+    assert!(report_content.contains("alpha.docx"));
+    assert!(report_content.contains("beta.docx"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_21_batch_recursive_directory_conversion() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case21_batch_rec");
+    let in_dir = dir.join("inputs");
+    let sub_dir = in_dir.join("sub_a").join("nested_b");
+    let out_dir = dir.join("outputs");
+    fs::create_dir_all(&sub_dir).unwrap();
+
+    fs::write(in_dir.join("root.docx"), make_test_docx("Root content")).unwrap();
+    fs::write(sub_dir.join("leaf.docx"), make_test_docx("Leaf content")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--recursive")
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(output.status.code(), Some(0), "Recursive batch conversion must succeed");
+    assert!(out_dir.join("root.pdf").exists(), "root.pdf must exist");
+    let nested_pdf = out_dir.join("sub_a").join("nested_b").join("leaf.pdf");
+    assert!(
+        nested_pdf.exists(),
+        "leaf.pdf must exist under mirrored subdirectory structure: {:?}",
+        nested_pdf
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_22_cli_analyze_mode_no_output_flag() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case22_analyze_no_output");
+    let in_file = dir.join("document.docx");
+    fs::write(&in_file, make_test_docx("WorDF 分析测试文本 12345")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .output()
+        .expect("Failed to execute wordf binary in --analyze mode");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Analyze mode without -o must succeed with exit code 0"
+    );
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout_str.contains("WorDF Document Analysis Report"),
+        "Stdout must contain analysis report header, got: {}",
+        stdout_str
+    );
+    assert!(stdout_str.contains("East Asian Chars:"));
+    assert!(stdout_str.contains("Paragraphs:"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_23_cli_analyze_mode_report_json() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case23_analyze_json");
+    let in_file = dir.join("diag.docx");
+    let report_json = dir.join("analysis_report.json");
+    fs::write(&in_file, make_test_docx("诊断模式 JSON 输出测试")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .arg("--report-json")
+        .arg(&report_json)
+        .output()
+        .expect("Failed to execute wordf binary in --analyze mode with --report-json");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Analyze mode with --report-json must succeed"
+    );
+    assert!(
+        report_json.exists(),
+        "Analysis JSON report must be created on disk"
+    );
+
+    let json_content = fs::read_to_string(&report_json).unwrap();
+    assert!(json_content.contains(r#""mode": "analyze""#));
+    assert!(json_content.contains(r#""paragraphs": 1"#));
+    assert!(json_content.contains(r#""cjk_characters":"#));
+    assert!(json_content.contains(r#""diagnostics":"#));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_24_cli_strict_mode_rejects_warnings() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case24_strict_rejection");
+    // Write DOCX bytes into a filename ending with .doc to trigger input.extension_mismatch warning
+    let in_file = dir.join("mismatch_container.doc");
+    let out_non_strict = dir.join("out_regular.pdf");
+    let out_strict = dir.join("out_strict.pdf");
+    let strict_report = dir.join("strict_report.json");
+    fs::write(&in_file, make_test_docx("Strict mode warning test content")).unwrap();
+
+    // 1. Regular conversion should tolerate warnings and succeed (exit code 0)
+    let output_reg = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_non_strict)
+        .output()
+        .expect("Failed to execute wordf in regular mode");
+    assert_eq!(
+        output_reg.status.code(),
+        Some(0),
+        "Regular mode should succeed despite extension mismatch warning"
+    );
+    assert!(out_non_strict.exists(), "Regular mode must produce output PDF");
+
+    // 2. Strict conversion must reject warning and abort without writing PDF (exit code 3)
+    let output_strict = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_strict)
+        .arg("--strict")
+        .arg("--report-json")
+        .arg(&strict_report)
+        .output()
+        .expect("Failed to execute wordf in strict mode");
+    assert_eq!(
+        output_strict.status.code(),
+        Some(3),
+        "Strict mode must fail with exit code 3 when warnings are present"
+    );
+    assert!(
+        !out_strict.exists(),
+        "Strict mode must NOT produce output PDF when aborted"
+    );
+    assert!(
+        strict_report.exists(),
+        "Strict mode should produce diagnostic JSON report if requested"
+    );
+
+    let report_content = fs::read_to_string(&strict_report).unwrap();
+    assert!(report_content.contains(r#""conversion_status": "failure_strict""#));
+    assert!(report_content.contains(r#""delivery_status": "aborted""#));
+    assert!(report_content.contains("input.extension_mismatch"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_25_cli_analyze_strict_mode_rejects_warnings() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case25_analyze_strict");
+    let in_file = dir.join("mismatch.doc");
+    fs::write(&in_file, make_test_docx("Analyze strict warning test")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .arg("--strict")
+        .output()
+        .expect("Failed to execute wordf in analyze strict mode");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "Analyze mode with --strict must fail with exit code 3 when warnings are detected"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_26_batch_resume_incremental_conversion() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case26_batch_resume");
+    let in_dir = dir.join("inputs");
+    let out_dir = dir.join("outputs");
+    let rep_json = dir.join("resume_report.json");
+    fs::create_dir_all(&in_dir).unwrap();
+
+    let doc1 = in_dir.join("doc1.docx");
+    let doc2 = in_dir.join("doc2.docx");
+    let pdf1 = out_dir.join("doc1.pdf");
+    let pdf2 = out_dir.join("doc2.pdf");
+
+    fs::write(&doc1, make_test_docx("Initial content 1")).unwrap();
+    fs::write(&doc2, make_test_docx("Initial content 2")).unwrap();
+
+    // 1. Initial conversion without --resume
+    let out1 = Command::new(&bin)
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .expect("Failed initial batch conversion");
+    assert_eq!(out1.status.code(), Some(0));
+    assert!(pdf1.exists());
+    assert!(pdf2.exists());
+
+    let pdf1_mtime_init = pdf1.metadata().unwrap().modified().unwrap();
+
+    // 2. Run again with --resume immediately -> both should be skipped
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let out2 = Command::new(&bin)
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--resume")
+        .arg("--report-json")
+        .arg(&rep_json)
+        .output()
+        .expect("Failed resume batch conversion");
+    assert_eq!(out2.status.code(), Some(0));
+
+    let rep2 = fs::read_to_string(&rep_json).unwrap();
+    assert!(rep2.contains(r#""skipped": 2"#), "Both files must be skipped when up-to-date");
+    assert!(rep2.contains(r#""succeeded": 0"#));
+
+    let pdf1_mtime_after_skip = pdf1.metadata().unwrap().modified().unwrap();
+    assert_eq!(pdf1_mtime_init, pdf1_mtime_after_skip, "Up-to-date PDF must not be re-written");
+
+    // 3. Update doc1 only, run again with --resume -> doc1 converted, doc2 skipped
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    fs::write(&doc1, make_test_docx("Updated content for doc1")).unwrap();
+
+    let out3 = Command::new(&bin)
+        .arg(&in_dir)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--resume")
+        .arg("--report-json")
+        .arg(&rep_json)
+        .output()
+        .expect("Failed incremental batch conversion");
+    assert_eq!(out3.status.code(), Some(0));
+
+    let rep3 = fs::read_to_string(&rep_json).unwrap();
+    assert!(rep3.contains(r#""succeeded": 1"#), "Modified document must be converted");
+    assert!(rep3.contains(r#""skipped": 1"#), "Unmodified document must be skipped");
+
+    let pdf1_mtime_updated = pdf1.metadata().unwrap().modified().unwrap();
+    assert!(pdf1_mtime_updated > pdf1_mtime_init, "Modified doc1.pdf must be updated");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_27_single_file_resume_incremental() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case27_single_resume");
+    let in_file = dir.join("single.docx");
+    let out_file = dir.join("single.pdf");
+
+    fs::write(&in_file, make_test_docx("Single file initial")).unwrap();
+
+    // Initial conversion
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .output()
+        .expect("Failed initial conversion");
+    assert_eq!(out1.status.code(), Some(0));
+    assert!(out_file.exists());
+
+    // Run again with --resume -> should skip without error
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--resume")
+        .output()
+        .expect("Failed single file resume");
+    assert_eq!(out2.status.code(), Some(0));
+    let stderr_str = String::from_utf8_lossy(&out2.stderr);
+    assert!(stderr_str.contains("up-to-date"));
+
+    // Modify input file -> should convert and overwrite
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    fs::write(&in_file, make_test_docx("Single file modified")).unwrap();
+
+    let out3 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--resume")
+        .output()
+        .expect("Failed single file resume re-conversion");
+    assert_eq!(out3.status.code(), Some(0));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_28_cli_stdin_to_file() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case28_stdin_to_file");
+    let out_file = dir.join("from_stdin.pdf");
+    let docx_bytes = make_test_docx("Stdin to file stream conversion");
+
+    let mut child = Command::new(&bin)
+        .arg("-")
+        .arg("-o")
+        .arg(&out_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn wordf process");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&docx_bytes)
+        .expect("Failed to write to stdin");
+
+    let output = child.wait_with_output().expect("Failed to wait on child");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdin -> file must exit with code 0"
+    );
+    assert!(out_file.exists(), "Output PDF must be generated");
+
+    let pdf_bytes = fs::read(&out_file).unwrap();
+    assert!(
+        pdf_bytes.starts_with(b"%PDF-"),
+        "Output file must be a valid PDF"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_29_cli_file_to_stdout() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case29_file_to_stdout");
+    let in_file = dir.join("local.docx");
+    fs::write(&in_file, make_test_docx("File to stdout stream conversion")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg("-")
+        .output()
+        .expect("Failed to execute wordf file -> stdout");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "file -> stdout must exit with code 0"
+    );
+    assert!(
+        output.stdout.starts_with(b"%PDF-"),
+        "stdout stream must start with %PDF- header"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_30_cli_stdin_to_stdout_pipeline() {
+    let bin = get_bin_path();
+    let docx_bytes = make_test_docx("Full pipeline stream test: stdin -> stdout");
+
+    let mut child = Command::new(&bin)
+        .arg("-")
+        .arg("-o")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn wordf pipeline process");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&docx_bytes)
+        .expect("Failed to write to pipeline stdin");
+
+    let output = child.wait_with_output().expect("Failed to wait on child");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Full pipeline must exit with code 0"
+    );
+    assert!(
+        output.stdout.starts_with(b"%PDF-"),
+        "Pipeline stdout must output valid PDF bytes"
+    );
+}
+
+fn build_minimal_ttf_format12(char_code: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    buf.extend_from_slice(&1u16.to_be_bytes()); // 1 table
+    buf.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+
+    let cmap_tag_offset = buf.len();
+    buf.extend_from_slice(b"cmap");
+    buf.extend_from_slice(&[0, 0, 0, 0]); // checksum
+    let table_offset = (buf.len() + 8) as u32;
+    buf.extend_from_slice(&table_offset.to_be_bytes());
+    buf.extend_from_slice(&[0, 0, 0, 0]); // len placeholder
+
+    // cmap header
+    buf.extend_from_slice(&0u16.to_be_bytes());
+    buf.extend_from_slice(&1u16.to_be_bytes()); // 1 subtable
+
+    // subtable 0: Unicode Format 12
+    buf.extend_from_slice(&3u16.to_be_bytes()); // Windows
+    buf.extend_from_slice(&10u16.to_be_bytes()); // UCS-4
+    let sub_offset = 4 + 8;
+    buf.extend_from_slice(&(sub_offset as u32).to_be_bytes());
+
+    // Format 12 subtable
+    buf.extend_from_slice(&12u16.to_be_bytes());
+    buf.extend_from_slice(&0u16.to_be_bytes());
+    let f12_len = 16 + 12;
+    buf.extend_from_slice(&(f12_len as u32).to_be_bytes());
+    buf.extend_from_slice(&0u32.to_be_bytes()); // language
+    buf.extend_from_slice(&1u32.to_be_bytes()); // 1 group
+
+    buf.extend_from_slice(&char_code.to_be_bytes());
+    buf.extend_from_slice(&char_code.to_be_bytes());
+    buf.extend_from_slice(&1u32.to_be_bytes()); // glyph id 1
+
+    let total_table_len = buf.len() - (table_offset as usize);
+    buf[cmap_tag_offset + 12..cmap_tag_offset + 16].copy_from_slice(&(total_table_len as u32).to_be_bytes());
+
+    buf
+}
+
+#[test]
+fn test_case_31_cli_multi_font_fallback_chain() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case31_font_chain");
+    let font_a = dir.join("font_alpha.ttf");
+    let font_b = dir.join("font_beta.ttf");
+    let in_file = dir.join("compound.docx");
+
+    // Font Alpha covers '甲' (U+7532)
+    fs::write(&font_a, build_minimal_ttf_format12(0x7532)).unwrap();
+    // Font Beta covers '乙' (U+4E59)
+    fs::write(&font_b, build_minimal_ttf_format12(0x4E59)).unwrap();
+
+    // Document contains both '甲' and '乙'
+    fs::write(&in_file, make_test_docx("甲乙")).unwrap();
+
+    // 1. Single font (alpha only) in strict analyze mode fails due to missing '乙'
+    let out_single = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .arg("--strict")
+        .arg("--font-path")
+        .arg(&font_a)
+        .output()
+        .expect("Failed to execute wordf in single font mode");
+    assert_eq!(
+        out_single.status.code(),
+        Some(3),
+        "Single font lacking '乙' must fail in strict analyze mode"
+    );
+
+    // 2. Multi-font fallback chain (both alpha and beta) covers all glyphs -> succeeds
+    let chain_arg = format!("{},{}", font_a.to_string_lossy(), font_b.to_string_lossy());
+    let out_chain = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .arg("--strict")
+        .arg("--font-path")
+        .arg(&chain_arg)
+        .output()
+        .expect("Failed to execute wordf in multi-font chain mode");
+    assert_eq!(
+        out_chain.status.code(),
+        Some(0),
+        "Multi-font fallback chain covering all glyphs must succeed in strict analyze mode"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn make_multipage_docx(pages: &[&str]) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut writer = ZipWriter::new(&mut buf);
+        let opt = SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", opt).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+            )
+            .unwrap();
+
+        writer.start_file("_rels/.rels", opt).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+            )
+            .unwrap();
+
+        writer.start_file("word/document.xml", opt).unwrap();
+        let mut body_content = String::new();
+        for (i, text) in pages.iter().enumerate() {
+            if i > 0 {
+                body_content.push_str(r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#);
+            }
+            body_content.push_str(&format!(
+                r#"<w:p><w:r><w:t>{}</w:t></w:r></w:p>"#,
+                text
+            ));
+        }
+        let doc_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    {}
+  </w:body>
+</w:document>"#,
+            body_content
+        );
+        writer.write_all(doc_xml.as_bytes()).unwrap();
+
+        writer.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+#[test]
+fn test_case_32_cli_pages_slice_export() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case32_pages_slice");
+    let in_file = dir.join("multi.docx");
+    let out_p2 = dir.join("p2.pdf");
+    let rep_p2 = dir.join("p2_rep.json");
+    let out_p12 = dir.join("p12.pdf");
+    let rep_p12 = dir.join("p12_rep.json");
+    let out_p5 = dir.join("p5.pdf");
+
+    fs::write(
+        &in_file,
+        make_multipage_docx(&["First page content", "Second page content", "Third page content"]),
+    )
+    .unwrap();
+
+    // 1. Single page slice: --pages 2
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_p2)
+        .arg("--pages")
+        .arg("2")
+        .arg("--report-json")
+        .arg(&rep_p2)
+        .output()
+        .expect("Failed to execute wordf with --pages 2");
+    assert_eq!(out1.status.code(), Some(0));
+    assert!(out_p2.exists());
+    let rep1_str = fs::read_to_string(&rep_p2).unwrap();
+    assert!(rep1_str.contains(r#""page_count": 1"#), "Extracted single page must have page_count 1");
+
+    // 2. Page range slice: --pages 1-2
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_p12)
+        .arg("--pages")
+        .arg("1-2")
+        .arg("--report-json")
+        .arg(&rep_p12)
+        .output()
+        .expect("Failed to execute wordf with --pages 1-2");
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(out_p12.exists());
+    let rep2_str = fs::read_to_string(&rep_p12).unwrap();
+    assert!(rep2_str.contains(r#""page_count": 2"#), "Extracted page range 1-2 must have page_count 2");
+
+    // 3. Page range exceeding document total pages: --pages 5 -> exit code 3
+    let out3 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_p5)
+        .arg("--pages")
+        .arg("5")
+        .output()
+        .expect("Failed to execute wordf with --pages 5");
+    assert_eq!(
+        out3.status.code(),
+        Some(3),
+        "Out-of-range page selection must fail with exit code 3"
+    );
+    let stderr3 = String::from_utf8_lossy(&out3.stderr);
+    assert!(
+        stderr3.contains("out of range") || stderr3.contains("exceeds"),
+        "Error message must indicate page index out of range: {}",
+        stderr3
+    );
+
+    // 4. Invalid CLI syntax: --pages 0 -> exit code 2
+    let out4 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(dir.join("invalid.pdf"))
+        .arg("--pages")
+        .arg("0")
+        .output()
+        .expect("Failed to execute wordf with invalid --pages 0");
+    assert_eq!(
+        out4.status.code(),
+        Some(2),
+        "Invalid 0-page input must be rejected by CLI parser with exit code 2"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_33_encrypted_docx_cli_scenarios() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case33_encrypted");
+    let in_file = dir.join("protected.docx");
+    let out_no_pwd = dir.join("no_pwd.pdf");
+    let out_wrong_pwd = dir.join("wrong_pwd.pdf");
+    let out_correct = dir.join("correct.pdf");
+
+    let docx = make_test_docx("Classified Document Content for CLI Test");
+    let password = "SecretWordfPassword#2026";
+    let encrypted_cfb = wordf::crypto::agile::build_agile_encrypted_cfb_for_test(&docx, password);
+    fs::write(&in_file, &encrypted_cfb).unwrap();
+
+    // 1. Missing --password -> exit code 3
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_no_pwd)
+        .output()
+        .expect("Failed to execute wordf without password");
+    assert_eq!(out1.status.code(), Some(3), "Missing password must fail with exit code 3");
+    assert!(!out_no_pwd.exists(), "Output PDF must not be created");
+    let stderr1 = String::from_utf8_lossy(&out1.stderr);
+    assert!(stderr1.contains("password-protected") || stderr1.contains("--password"));
+
+    // 2. Wrong --password -> exit code 3
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_wrong_pwd)
+        .arg("--password")
+        .arg("IncorrectPass")
+        .output()
+        .expect("Failed to execute wordf with wrong password");
+    assert_eq!(out2.status.code(), Some(3), "Wrong password must fail with exit code 3");
+    assert!(!out_wrong_pwd.exists(), "Output PDF must not be created");
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(stderr2.contains("Incorrect password"));
+
+    // 3. Correct --password -> exit code 0 and valid PDF created
+    let out3 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_correct)
+        .arg("--password")
+        .arg(password)
+        .output()
+        .expect("Failed to execute wordf with correct password");
+    assert_eq!(out3.status.code(), Some(0), "Correct password must succeed with exit code 0");
+    assert!(out_correct.exists(), "Output PDF must exist");
+    let pdf_bytes = fs::read(&out_correct).unwrap();
+    assert!(pdf_bytes.starts_with(b"%PDF-"));
+
+    // 4. Document analysis with --password
+    let out4 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .arg("--password")
+        .arg(password)
+        .output()
+        .expect("Failed to execute wordf --analyze with password");
+    assert_eq!(out4.status.code(), Some(0));
+    let stdout4 = String::from_utf8_lossy(&out4.stdout);
+    assert!(stdout4.contains("WorDF Document Analysis Report"));
+    assert!(stdout4.contains("Format:      OOXML DOCX"));
+
+    // 5. Stdin/Stdout stream conversion with --password
+    let mut child = Command::new(&bin)
+        .arg("-")
+        .arg("-o")
+        .arg("-")
+        .arg("--password")
+        .arg(password)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn wordf stdin/stdout process");
+
+    {
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        stdin.write_all(&encrypted_cfb).expect("Failed to write to stdin");
+    }
+
+    let out5 = child.wait_with_output().expect("Failed to wait on child");
+    assert_eq!(out5.status.code(), Some(0));
+    assert!(out5.stdout.starts_with(b"%PDF-"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_34_cli_metadata_injection_and_pdf_info() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case34_metadata");
+    let in_file = dir.join("plain.docx");
+    let out_file = dir.join("meta.pdf");
+    let report_file = dir.join("meta_analysis.json");
+
+    fs::write(&in_file, make_test_docx("Metadata CLI verification test document.")).unwrap();
+
+    // 1. Conversion with --title, --author, --subject, --keywords
+    let output = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--title")
+        .arg("CLI Custom Title")
+        .arg("--author")
+        .arg("CLI Custom Author")
+        .arg("--subject")
+        .arg("CLI Custom Subject")
+        .arg("--keywords")
+        .arg("rust,metadata,cli")
+        .output()
+        .expect("Failed to run wordf with metadata flags");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(out_file.exists());
+    let pdf_bytes = fs::read(&out_file).unwrap();
+    let pdf_str = String::from_utf8_lossy(&pdf_bytes);
+    assert!(pdf_str.contains("CLI Custom Title"));
+    assert!(pdf_str.contains("CLI Custom Author"));
+    assert!(pdf_str.contains("CLI Custom Subject"));
+    assert!(pdf_str.contains("rust,metadata,cli"));
+
+    // 2. Analyze mode with metadata flags and --report-json
+    let out_an = Command::new(&bin)
+        .arg(&in_file)
+        .arg("--analyze")
+        .arg("--title")
+        .arg("Analysis Title")
+        .arg("--author")
+        .arg("Analysis Author")
+        .arg("--report-json")
+        .arg(&report_file)
+        .output()
+        .expect("Failed to run wordf --analyze with metadata");
+
+    assert_eq!(out_an.status.code(), Some(0));
+    let stdout_an = String::from_utf8_lossy(&out_an.stdout);
+    assert!(stdout_an.contains("[Document Metadata]"));
+    assert!(stdout_an.contains("Analysis Title"));
+    assert!(stdout_an.contains("Analysis Author"));
+
+    assert!(report_file.exists());
+    let rep_str = fs::read_to_string(&report_file).unwrap();
+    assert!(rep_str.contains("Analysis Title"));
+    assert!(rep_str.contains("Analysis Author"));
 
     let _ = fs::remove_dir_all(&dir);
 }
