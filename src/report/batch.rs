@@ -32,14 +32,24 @@ pub fn format_batch_report_json(data: &BatchReportData) -> String {
         items_json.push_str("[\n");
         for (i, item) in data.items.iter().enumerate() {
             items_json.push_str("    {\n");
-            items_json.push_str(&format!("      \"input\": \"{}\",\n", escape_json_str(&item.input_path)));
-            items_json.push_str(&format!("      \"output\": \"{}\",\n", escape_json_str(&item.output_path)));
-            items_json.push_str(&format!("      \"status\": \"{}\",\n", escape_json_str(&item.status)));
+            items_json.push_str(&format!(
+                "      \"input\": \"{}\",\n",
+                escape_json_str(&item.input_path)
+            ));
+            items_json.push_str(&format!(
+                "      \"output\": \"{}\",\n",
+                escape_json_str(&item.output_path)
+            ));
+            items_json.push_str(&format!(
+                "      \"status\": \"{}\",\n",
+                escape_json_str(&item.status)
+            ));
             items_json.push_str(&format!("      \"page_count\": {},\n", item.page_count));
             items_json.push_str(&format!("      \"elapsed_ms\": {:.1},\n", item.elapsed_ms));
             match &item.error {
                 Some(err) => {
-                    items_json.push_str(&format!("      \"error\": \"{}\"\n", escape_json_str(err)));
+                    items_json
+                        .push_str(&format!("      \"error\": \"{}\"\n", escape_json_str(err)));
                 }
                 None => {
                     items_json.push_str("      \"error\": null\n");

@@ -41,7 +41,8 @@ impl FontCmap {
             return None;
         }
 
-        let num_tables = u16::from_be_bytes([bytes[font_offset + 4], bytes[font_offset + 5]]) as usize;
+        let num_tables =
+            u16::from_be_bytes([bytes[font_offset + 4], bytes[font_offset + 5]]) as usize;
         let mut cmap_offset = None;
         for i in 0..num_tables {
             let entry = font_offset + 12 + i * 16;
@@ -65,7 +66,8 @@ impl FontCmap {
             return None;
         }
 
-        let num_subtables = u16::from_be_bytes([bytes[cmap_offset + 2], bytes[cmap_offset + 3]]) as usize;
+        let num_subtables =
+            u16::from_be_bytes([bytes[cmap_offset + 2], bytes[cmap_offset + 3]]) as usize;
         let mut format4_subtables = Vec::new();
         let mut format12_groups = Vec::new();
 
@@ -86,8 +88,8 @@ impl FontCmap {
                 continue;
             };
 
-            let is_unicode = (platform_id == 0)
-                || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+            let is_unicode =
+                (platform_id == 0) || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
 
             if !is_unicode || sub_offset + 2 > bytes.len() {
                 continue;
@@ -201,9 +203,12 @@ impl FontCmap {
         let mut groups = Vec::with_capacity(num_groups);
         for i in 0..num_groups {
             let p = offset + 16 + i * 12;
-            let start_char_code = u32::from_be_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]);
-            let end_char_code = u32::from_be_bytes([bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]]);
-            let start_glyph_id = u32::from_be_bytes([bytes[p + 8], bytes[p + 9], bytes[p + 10], bytes[p + 11]]);
+            let start_char_code =
+                u32::from_be_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]);
+            let end_char_code =
+                u32::from_be_bytes([bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]]);
+            let start_glyph_id =
+                u32::from_be_bytes([bytes[p + 8], bytes[p + 9], bytes[p + 10], bytes[p + 11]]);
             groups.push(Format12Group {
                 start_char_code,
                 end_char_code,
@@ -268,7 +273,8 @@ impl FontCmap {
                 .checked_add(id_range_offset)?
                 .checked_add(code_diff)?;
             if glyph_addr + 2 <= font_bytes.len() {
-                let raw_id = u16::from_be_bytes([font_bytes[glyph_addr], font_bytes[glyph_addr + 1]]);
+                let raw_id =
+                    u16::from_be_bytes([font_bytes[glyph_addr], font_bytes[glyph_addr + 1]]);
                 if raw_id == 0 {
                     Some(0)
                 } else {
@@ -279,14 +285,4 @@ impl FontCmap {
             }
         }
     }
-}
-
-static EMBEDDED_FONT_CMAP: std::sync::OnceLock<Option<FontCmap>> = std::sync::OnceLock::new();
-
-/// Returns pre-parsed, cached FontCmap for the embedded font bytes,
-/// ensuring Format 4 and Format 12 tables are parsed at most once across the process lifetime.
-pub fn get_or_init_embedded_font_cmap(embedded_bytes: &[u8]) -> Option<&'static FontCmap> {
-    EMBEDDED_FONT_CMAP
-        .get_or_init(|| FontCmap::from_bytes(embedded_bytes))
-        .as_ref()
 }

@@ -34,7 +34,8 @@ pub fn extract_font_family_names(bytes: &[u8]) -> Vec<String> {
         if font_offset + 12 > bytes.len() {
             continue;
         }
-        let num_tables = u16::from_be_bytes([bytes[font_offset + 4], bytes[font_offset + 5]]) as usize;
+        let num_tables =
+            u16::from_be_bytes([bytes[font_offset + 4], bytes[font_offset + 5]]) as usize;
         let mut name_offset = None;
         for i in 0..num_tables {
             let entry_start = font_offset + 12 + i * 16;
@@ -74,7 +75,10 @@ pub fn extract_font_family_names(bytes: &[u8]) -> Vec<String> {
             let offset = u16::from_be_bytes([bytes[rec + 10], bytes[rec + 11]]) as usize;
 
             if nid == 1 {
-                let Some(str_pos) = no.checked_add(str_offset).and_then(|p| p.checked_add(offset)) else {
+                let Some(str_pos) = no
+                    .checked_add(str_offset)
+                    .and_then(|p| p.checked_add(offset))
+                else {
                     continue;
                 };
                 let Some(str_end) = str_pos.checked_add(length) else {

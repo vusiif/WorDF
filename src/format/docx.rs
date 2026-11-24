@@ -117,7 +117,12 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
             }
             // Buffer at most 64 KiB to determine dimensions, preventing large image memory spikes
             let mut img_header = Vec::new();
-            if file.by_ref().take(65536).read_to_end(&mut img_header).is_ok() {
+            if file
+                .by_ref()
+                .take(65536)
+                .read_to_end(&mut img_header)
+                .is_ok()
+            {
                 let size_opt = imagesize::blob_size(&img_header).or_else(|_| {
                     let _ = file.read_to_end(&mut img_header);
                     imagesize::blob_size(&img_header)
@@ -179,7 +184,9 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
     if !has_rels {
         return Err(ConversionError {
             kind: ConversionErrorKind::CorruptInput,
-            message: "Missing 'word/_rels/document.xml.rels' or package relationships in DOCX package".to_string(),
+            message:
+                "Missing 'word/_rels/document.xml.rels' or package relationships in DOCX package"
+                    .to_string(),
         });
     }
 

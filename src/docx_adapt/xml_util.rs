@@ -122,19 +122,26 @@ pub fn extract_attribute_value<'a>(tag: &'a str, attr_name: &str) -> Option<&'a 
 
     while let Some(rel_pos) = tag[cursor..].find(attr_name) {
         let abs_pos = cursor + rel_pos;
-        let char_before_ok = abs_pos == 0 || matches!(bytes[abs_pos - 1], b' ' | b'\t' | b'\r' | b'\n');
+        let char_before_ok =
+            abs_pos == 0 || matches!(bytes[abs_pos - 1], b' ' | b'\t' | b'\r' | b'\n');
 
         if char_before_ok {
             let mut check_pos = abs_pos + attr_name.len();
-            while check_pos < bytes.len() && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n') {
+            while check_pos < bytes.len()
+                && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n')
+            {
                 check_pos += 1;
             }
             if check_pos < bytes.len() && bytes[check_pos] == b'=' {
                 check_pos += 1;
-                while check_pos < bytes.len() && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n') {
+                while check_pos < bytes.len()
+                    && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n')
+                {
                     check_pos += 1;
                 }
-                if check_pos < bytes.len() && (bytes[check_pos] == b'"' || bytes[check_pos] == b'\'') {
+                if check_pos < bytes.len()
+                    && (bytes[check_pos] == b'"' || bytes[check_pos] == b'\'')
+                {
                     let quote_char = bytes[check_pos];
                     let val_start = check_pos + 1;
                     if let Some(val_end_rel) = tag[val_start..].find(quote_char as char) {
@@ -182,15 +189,21 @@ pub fn update_or_insert_attribute(tag: &str, attr_name: &str, new_value: &str) -
 
         if char_before_ok {
             let mut check_pos = abs_pos + attr_name.len();
-            while check_pos < bytes.len() && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n') {
+            while check_pos < bytes.len()
+                && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n')
+            {
                 check_pos += 1;
             }
             if check_pos < bytes.len() && bytes[check_pos] == b'=' {
                 check_pos += 1;
-                while check_pos < bytes.len() && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n') {
+                while check_pos < bytes.len()
+                    && matches!(bytes[check_pos], b' ' | b'\t' | b'\r' | b'\n')
+                {
                     check_pos += 1;
                 }
-                if check_pos < bytes.len() && (bytes[check_pos] == b'"' || bytes[check_pos] == b'\'') {
+                if check_pos < bytes.len()
+                    && (bytes[check_pos] == b'"' || bytes[check_pos] == b'\'')
+                {
                     let quote_char = bytes[check_pos];
                     let val_start = check_pos + 1;
                     if let Some(val_end_rel) = tag[val_start..].find(quote_char as char) {
@@ -217,7 +230,8 @@ pub fn update_or_insert_attribute(tag: &str, attr_name: &str, new_value: &str) -
         let trimmed = tag.trim_end();
         if let Some(stripped) = trimmed.strip_suffix("/>") {
             let prefix = stripped.trim_end();
-            let mut res = String::with_capacity(prefix.len() + attr_name.len() + new_value.len() + 6);
+            let mut res =
+                String::with_capacity(prefix.len() + attr_name.len() + new_value.len() + 6);
             res.push_str(prefix);
             res.push(' ');
             res.push_str(attr_name);
@@ -227,7 +241,8 @@ pub fn update_or_insert_attribute(tag: &str, attr_name: &str, new_value: &str) -
             res
         } else if let Some(stripped) = trimmed.strip_suffix('>') {
             let prefix = stripped.trim_end();
-            let mut res = String::with_capacity(prefix.len() + attr_name.len() + new_value.len() + 6);
+            let mut res =
+                String::with_capacity(prefix.len() + attr_name.len() + new_value.len() + 6);
             res.push_str(prefix);
             res.push(' ');
             res.push_str(attr_name);

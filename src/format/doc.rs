@@ -87,7 +87,10 @@ pub fn validate_doc_package(bytes: &[u8]) -> Result<(), ConversionError> {
     if w_ident != 0xA5EC && w_ident != 0xA5DC && w_ident != 0xA5C6 {
         return Err(ConversionError {
             kind: ConversionErrorKind::CorruptInput,
-            message: format!("Invalid FIB wIdent in WordDocument stream: 0x{:04X}", w_ident),
+            message: format!(
+                "Invalid FIB wIdent in WordDocument stream: 0x{:04X}",
+                w_ident
+            ),
         });
     }
 

@@ -68,10 +68,12 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
             let max_bytes = crate::format::docx::MAX_DOCX_MAIN_XML_BYTES;
             let mut xml_content = String::with_capacity(uncompressed_size.min(max_bytes as usize));
             let mut handle = (&mut file).take(max_bytes + 1);
-            handle.read_to_string(&mut xml_content).map_err(|e| ConversionError {
-                kind: ConversionErrorKind::CorruptInput,
-                message: format!("Failed to read XML text part '{}': {}", name, e),
-            })?;
+            handle
+                .read_to_string(&mut xml_content)
+                .map_err(|e| ConversionError {
+                    kind: ConversionErrorKind::CorruptInput,
+                    message: format!("Failed to read XML text part '{}': {}", name, e),
+                })?;
             if xml_content.len() as u64 > max_bytes {
                 return Err(ConversionError {
                     kind: ConversionErrorKind::ResourceLimit,
@@ -85,7 +87,8 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                 let mut checked_chars = HashSet::new();
                 for_each_xml_text_node(&xml_content, |text| {
                     for c in text.chars() {
-                        if is_cjk_char(c) && checked_chars.insert(c) && !cmap.has_glyph(c, f_bytes) {
+                        if is_cjk_char(c) && checked_chars.insert(c) && !cmap.has_glyph(c, f_bytes)
+                        {
                             missing_chars.push(c);
                         }
                     }
@@ -118,14 +121,18 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                         .compression_method(file.compression())
                         .unix_permissions(file.unix_mode().unwrap_or(0o644));
 
-                    writer.start_file(&name, options).map_err(|e| ConversionError {
-                        kind: ConversionErrorKind::Internal,
-                        message: format!("Failed to write adapted zip entry '{}': {}", name, e),
-                    })?;
-                    writer.write_all(adapted_xml.as_bytes()).map_err(|e| ConversionError {
-                        kind: ConversionErrorKind::Internal,
-                        message: format!("Failed to write data for '{}': {}", name, e),
-                    })?;
+                    writer
+                        .start_file(&name, options)
+                        .map_err(|e| ConversionError {
+                            kind: ConversionErrorKind::Internal,
+                            message: format!("Failed to write adapted zip entry '{}': {}", name, e),
+                        })?;
+                    writer
+                        .write_all(adapted_xml.as_bytes())
+                        .map_err(|e| ConversionError {
+                            kind: ConversionErrorKind::Internal,
+                            message: format!("Failed to write data for '{}': {}", name, e),
+                        })?;
                     modified_entries += 1;
                     continue;
                 }
@@ -137,22 +144,32 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
         if is_styles_part(&name) {
             if let Some(fb) = fallback_font {
                 let max_bytes = crate::format::docx::MAX_DOCX_AUX_XML_BYTES;
-                let mut xml_content = String::with_capacity(uncompressed_size.min(max_bytes as usize));
+                let mut xml_content =
+                    String::with_capacity(uncompressed_size.min(max_bytes as usize));
                 let mut handle = (&mut file).take(max_bytes + 1);
-                if handle.read_to_string(&mut xml_content).is_ok() && xml_content.len() as u64 <= max_bytes {
+                if handle.read_to_string(&mut xml_content).is_ok()
+                    && xml_content.len() as u64 <= max_bytes
+                {
                     let adapted_styles = adapt_styles_xml(&xml_content, fb, available_fonts);
                     if adapted_styles != xml_content {
                         let options = SimpleFileOptions::default()
                             .compression_method(file.compression())
                             .unix_permissions(file.unix_mode().unwrap_or(0o644));
 
-                        writer.start_file(&name, options).map_err(|e| ConversionError {
-                            kind: ConversionErrorKind::Internal,
-                            message: format!("Failed to write adapted zip entry '{}': {}", name, e),
-                        })?;
-                        writer.write_all(adapted_styles.as_bytes()).map_err(|e| ConversionError {
-                            kind: ConversionErrorKind::Internal,
-                            message: format!("Failed to write data for '{}': {}", name, e),
+                        writer
+                            .start_file(&name, options)
+                            .map_err(|e| ConversionError {
+                                kind: ConversionErrorKind::Internal,
+                                message: format!(
+                                    "Failed to write adapted zip entry '{}': {}",
+                                    name, e
+                                ),
+                            })?;
+                        writer.write_all(adapted_styles.as_bytes()).map_err(|e| {
+                            ConversionError {
+                                kind: ConversionErrorKind::Internal,
+                                message: format!("Failed to write data for '{}': {}", name, e),
+                            }
                         })?;
                         modified_entries += 1;
                         continue;
@@ -199,21 +216,23 @@ mod tests {
         }
         let input_zip = buf.into_inner();
 
-        let (adapted_zip, count) = adapt_docx_cjk_in_memory_with_bytes(
-            &input_zip,
-            Some("SimSun"),
-            None,
-            &[],
-        ).expect("Adaptation must succeed");
+        let (adapted_zip, count) =
+            adapt_docx_cjk_in_memory_with_bytes(&input_zip, Some("SimSun"), None, &[])
+                .expect("Adaptation must succeed");
 
         assert_eq!(count, 2);
 
         // Verify media entry was preserved byte-for-byte
         let mut archive = ZipArchive::new(Cursor::new(adapted_zip.as_ref())).unwrap();
-        let mut media_file = archive.by_name("word/media/image1.png").expect("media entry must exist");
+        let mut media_file = archive
+            .by_name("word/media/image1.png")
+            .expect("media entry must exist");
         let mut extracted = Vec::new();
         media_file.read_to_end(&mut extracted).unwrap();
-        assert_eq!(extracted, test_payload, "Raw-copied binary stream must be 100% identical");
+        assert_eq!(
+            extracted, test_payload,
+            "Raw-copied binary stream must be 100% identical"
+        );
     }
 
     #[test]
@@ -231,21 +250,26 @@ mod tests {
         }
         let input_zip = buf.into_inner();
 
-        let (adapted_zip, count) = adapt_docx_cjk_in_memory_with_bytes(
-            &input_zip,
-            Some("LXGW WenKai Lite"),
-            None,
-            &[],
-        ).expect("Adaptation must succeed");
+        let (adapted_zip, count) =
+            adapt_docx_cjk_in_memory_with_bytes(&input_zip, Some("LXGW WenKai Lite"), None, &[])
+                .expect("Adaptation must succeed");
 
         assert_eq!(count, 2);
 
         let mut archive = ZipArchive::new(Cursor::new(adapted_zip.as_ref())).unwrap();
-        let mut styles_file = archive.by_name("word/styles.xml").expect("styles.xml must exist");
+        let mut styles_file = archive
+            .by_name("word/styles.xml")
+            .expect("styles.xml must exist");
         let mut styles_xml = String::new();
         styles_file.read_to_string(&mut styles_xml).unwrap();
 
-        assert!(styles_xml.contains(r#"w:ascii="Calibri""#), "West-European font must be preserved");
-        assert!(styles_xml.contains(r#"w:eastAsia="LXGW WenKai Lite""#), "East Asian fallback font must be injected into docDefaults");
+        assert!(
+            styles_xml.contains(r#"w:ascii="Calibri""#),
+            "West-European font must be preserved"
+        );
+        assert!(
+            styles_xml.contains(r#"w:eastAsia="LXGW WenKai Lite""#),
+            "East Asian fallback font must be injected into docDefaults"
+        );
     }
 }

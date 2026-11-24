@@ -83,7 +83,8 @@ fn test_consumer_reject_invalid_magic_bytes() {
 
 #[test]
 fn test_consumer_reject_rtf_format() {
-    let rtf_bytes = b"{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Courier;}} \\f0\\fs20 Hello Word!\\par}";
+    let rtf_bytes =
+        b"{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Courier;}} \\f0\\fs20 Hello Word!\\par}";
     let options = ConversionOptions::default();
 
     let err = convert(rtf_bytes, &options).unwrap_err();
@@ -249,16 +250,25 @@ fn test_consumer_convert_chinese_docx_with_default_embedded_font() {
     // Completely default options: no fallback font name specified, no system font path.
     let options = ConversionOptions::default();
 
-    let result = convert(&docx, &options).expect("Conversion of CJK DOCX with default embedded font must succeed");
+    let result = convert(&docx, &options)
+        .expect("Conversion of CJK DOCX with default embedded font must succeed");
 
     assert!(!result.pdf.is_empty(), "PDF bytes must not be empty");
-    assert!(result.pdf.starts_with(b"%PDF-"), "PDF must start with %PDF- header");
-    assert!(result.page_count >= 1, "Real page count must be >= 1, got {}", result.page_count);
+    assert!(
+        result.pdf.starts_with(b"%PDF-"),
+        "PDF must start with %PDF- header"
+    );
+    assert!(
+        result.page_count >= 1,
+        "Real page count must be >= 1, got {}",
+        result.page_count
+    );
 
     // Verify diagnostic warning was emitted for CJK fallback mapping to the embedded font
-    let has_font_fallback = result.warnings.iter().any(|w| {
-        w.code == "font.fallback" && w.message.contains(wordf::EMBEDDED_CJK_FONT_NAME)
-    });
+    let has_font_fallback = result
+        .warnings
+        .iter()
+        .any(|w| w.code == "font.fallback" && w.message.contains(wordf::EMBEDDED_CJK_FONT_NAME));
     assert!(
         has_font_fallback,
         "Warnings must contain font.fallback diagnostic referencing '{}', got: {:?}",
@@ -271,14 +281,25 @@ fn test_consumer_convert_chinese_docx_with_default_embedded_font() {
 #[cfg(feature = "embedded-cjk-font")]
 fn test_consumer_embedded_font_cmap_coverage_and_fail_fast() {
     let font_bytes = wordf::embedded_cjk_font_bytes();
-    assert!(!font_bytes.is_empty(), "Embedded font bytes must not be empty");
+    assert!(
+        !font_bytes.is_empty(),
+        "Embedded font bytes must not be empty"
+    );
 
-    let cmap = wordf::FontCmap::from_bytes(font_bytes).expect("Embedded font cmap parsing must succeed");
+    let cmap =
+        wordf::FontCmap::from_bytes(font_bytes).expect("Embedded font cmap parsing must succeed");
 
     // Standard characters must be covered
-    let common_chars = ['你', '好', '世', '界', '中', '文', '测', '试', '牢', '一', '桥', '梁', '栏', '杆', '固'];
+    let common_chars = [
+        '你', '好', '世', '界', '中', '文', '测', '试', '牢', '一', '桥', '梁', '栏', '杆', '固',
+    ];
     for &ch in &common_chars {
-        assert!(cmap.has_glyph(ch, font_bytes), "Embedded font must have glyph for '{}' (U+{:04X})", ch, ch as u32);
+        assert!(
+            cmap.has_glyph(ch, font_bytes),
+            "Embedded font must have glyph for '{}' (U+{:04X})",
+            ch,
+            ch as u32
+        );
     }
 
     // A character outside the font's coverage must fail fast during DOCX conversion
@@ -288,9 +309,14 @@ fn test_consumer_embedded_font_cmap_coverage_and_fail_fast() {
     let docx_unmapped = make_test_docx(&format!("正常文本与生僻字{}", unmapped_char));
     let options = ConversionOptions::default();
 
-    let err = convert(&docx_unmapped, &options).expect_err("Unmapped CJK character must fail fast with MissingFont");
+    let err = convert(&docx_unmapped, &options)
+        .expect_err("Unmapped CJK character must fail fast with MissingFont");
     assert_eq!(err.kind, ConversionErrorKind::MissingFont);
-    assert!(err.message.contains("Font diagnostic failure"), "Message: {}", err.message);
+    assert!(
+        err.message.contains("Font diagnostic failure"),
+        "Message: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -311,7 +337,8 @@ fn test_consumer_embedded_font_family_names() {
 fn test_consumer_no_embedded_font_cjk_fails_with_missing_font() {
     let docx = make_test_docx("你好世界，无内置字体测试。");
     let options = ConversionOptions::default();
-    let err = convert(&docx, &options).expect_err("Conversion of CJK DOCX without embedded font must fail with MissingFont");
+    let err = convert(&docx, &options)
+        .expect_err("Conversion of CJK DOCX without embedded font must fail with MissingFont");
     assert_eq!(err.kind, ConversionErrorKind::MissingFont);
 }
 
@@ -321,7 +348,10 @@ fn test_consumer_convert_binary_doc_route_b_sample() {
         ".sandbox-test/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/rwml-0.1.4/corpus/public/benchmark/sample/floating_text_bearing.doc",
     ];
 
-    let Some(doc_path) = sample_candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+    let Some(doc_path) = sample_candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+    else {
         return;
     };
 
@@ -330,10 +360,16 @@ fn test_consumer_convert_binary_doc_route_b_sample() {
 
     let result = convert(&doc_bytes, &options).expect("Conversion of binary DOC file must succeed");
     assert!(!result.pdf.is_empty(), "PDF bytes must not be empty");
-    assert!(result.pdf.starts_with(b"%PDF-"), "PDF must start with %PDF- header");
+    assert!(
+        result.pdf.starts_with(b"%PDF-"),
+        "PDF must start with %PDF- header"
+    );
     assert!(result.page_count >= 1, "Page count must be >= 1");
     assert!(
-        result.warnings.iter().any(|w| w.code == "layout.approximate"),
+        result
+            .warnings
+            .iter()
+            .any(|w| w.code == "layout.approximate"),
         "Route B must produce layout.approximate warning diagnostic"
     );
 }
@@ -367,7 +403,8 @@ fn test_consumer_encrypted_docx_roundtrip_api() {
 
     // 1. Missing password -> must return Encrypted error (exit code 3)
     let opts_no_pwd = ConversionOptions::default();
-    let err_no_pwd = convert(&encrypted_cfb, &opts_no_pwd).expect_err("Encrypted doc without password must fail");
+    let err_no_pwd = convert(&encrypted_cfb, &opts_no_pwd)
+        .expect_err("Encrypted doc without password must fail");
     assert_eq!(err_no_pwd.kind, ConversionErrorKind::Encrypted);
     assert_eq!(err_no_pwd.kind.exit_code(), 3);
     assert!(err_no_pwd.message.contains("password-protected"));
@@ -377,7 +414,8 @@ fn test_consumer_encrypted_docx_roundtrip_api() {
         password: Some("WrongPassword999".to_string()),
         ..Default::default()
     };
-    let err_wrong = convert(&encrypted_cfb, &opts_wrong).expect_err("Encrypted doc with wrong password must fail");
+    let err_wrong = convert(&encrypted_cfb, &opts_wrong)
+        .expect_err("Encrypted doc with wrong password must fail");
     assert_eq!(err_wrong.kind, ConversionErrorKind::Encrypted);
     assert_eq!(err_wrong.kind.exit_code(), 3);
     assert!(err_wrong.message.contains("Incorrect password"));
@@ -387,7 +425,8 @@ fn test_consumer_encrypted_docx_roundtrip_api() {
         password: Some(password.to_string()),
         ..Default::default()
     };
-    let res = convert(&encrypted_cfb, &opts_correct).expect("Decryption and conversion with correct password must succeed");
+    let res = convert(&encrypted_cfb, &opts_correct)
+        .expect("Decryption and conversion with correct password must succeed");
     assert!(!res.pdf.is_empty());
     assert!(res.pdf.starts_with(b"%PDF-"));
     assert!(res.page_count >= 1);
@@ -418,13 +457,32 @@ fn test_consumer_metadata_injection_and_pdf_info() {
 
     let pdf_str = String::from_utf8_lossy(&result.pdf);
     // Info dictionary and XMP metadata checks
-    assert!(pdf_str.contains("Annual Financial Report 2026"), "PDF must embed custom Title");
-    assert!(pdf_str.contains("Finance Department"), "PDF must embed custom Author/Creator");
-    assert!(pdf_str.contains("Q1 Earnings"), "PDF must embed custom Subject");
-    assert!(pdf_str.contains("finance,earnings"), "PDF must embed custom Keywords");
+    assert!(
+        pdf_str.contains("Annual Financial Report 2026"),
+        "PDF must embed custom Title"
+    );
+    assert!(
+        pdf_str.contains("Finance Department"),
+        "PDF must embed custom Author/Creator"
+    );
+    assert!(
+        pdf_str.contains("Q1 Earnings"),
+        "PDF must embed custom Subject"
+    );
+    assert!(
+        pdf_str.contains("finance,earnings"),
+        "PDF must embed custom Keywords"
+    );
 
     // Analysis mode check
-    let analysis = wordf::analyze_document(&docx, &opts).expect("Analyze with metadata must succeed");
-    assert_eq!(analysis.metadata.title.as_deref(), Some("Annual Financial Report 2026"));
-    assert_eq!(analysis.metadata.author.as_deref(), Some("Finance Department"));
+    let analysis =
+        wordf::analyze_document(&docx, &opts).expect("Analyze with metadata must succeed");
+    assert_eq!(
+        analysis.metadata.title.as_deref(),
+        Some("Annual Financial Report 2026")
+    );
+    assert_eq!(
+        analysis.metadata.author.as_deref(),
+        Some("Finance Department")
+    );
 }

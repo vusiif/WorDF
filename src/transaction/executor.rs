@@ -2,7 +2,7 @@
 //! License: GPL-3.0-or-later
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
@@ -64,12 +64,20 @@ impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SizeLimitExceeded(len) => {
-                write!(f, "Input file size ({} bytes) exceeds 128 MiB maximum limit", len)
+                write!(
+                    f,
+                    "Input file size ({} bytes) exceeds 128 MiB maximum limit",
+                    len
+                )
             }
             Self::IoRead(e) => write!(f, "I/O read error: {}", e),
             Self::Conversion(e) => write!(f, "Conversion error: {}", e),
             Self::StrictRejected(warns) => {
-                write!(f, "Strict mode rejected document: {} warning(s) present", warns.len())
+                write!(
+                    f,
+                    "Strict mode rejected document: {} warning(s) present",
+                    warns.len()
+                )
             }
             Self::TempFile(c) => write!(f, "Exclusive temp file creation failed (exit code {})", c),
             Self::IoWrite(e) => write!(f, "I/O write error: {}", e),
@@ -96,8 +104,12 @@ impl TaskExecutor {
             }
         }
 
-        // 2. Read input file
-        let bytes = fs::read(config.input_path).map_err(TaskError::IoRead)?;
+        // 2. Read input file with a hard cap so a file growing between the
+        //    metadata check and the read cannot exhaust memory.
+        let mut bytes = Vec::new();
+        let file = fs::File::open(config.input_path).map_err(TaskError::IoRead)?;
+        let mut handle = file.take(MAX_INPUT_BYTES as u64 + 1);
+        handle.read_to_end(&mut bytes).map_err(TaskError::IoRead)?;
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(TaskError::SizeLimitExceeded(bytes.len()));
         }
@@ -129,11 +141,12 @@ impl TaskExecutor {
             return Err(TaskError::IoWrite(e));
         }
 
-        atomic_commit_rename(&pdf_guard.path, config.output_pdf_path, config.overwrite)
-            .map_err(|_| {
+        atomic_commit_rename(&pdf_guard.path, config.output_pdf_path, config.overwrite).map_err(
+            |_| {
                 pdf_guard.cleanup();
                 TaskError::Commit(4)
-            })?;
+            },
+        )?;
         pdf_guard.committed = true;
 
         Ok(TaskResult {
@@ -144,11 +157,7 @@ impl TaskExecutor {
     }
 
     /// Check if container magic matches file extension, appending diagnostic if mismatched.
-    pub fn append_extension_diagnostics(
-        path: &Path,
-        bytes: &[u8],
-        warnings: &mut Vec<Diagnostic>,
-    ) {
+    pub fn append_extension_diagnostics(path: &Path, bytes: &[u8], warnings: &mut Vec<Diagnostic>) {
         let ext_lower = path
             .extension()
             .and_then(|s| s.to_str())

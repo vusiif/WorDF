@@ -49,11 +49,17 @@ impl PageRange {
                     ));
                 }
                 if start > MAX_PAGE_NUMBER || end > MAX_PAGE_NUMBER {
-                    return Err(format!("Page number exceeds maximum allowed limit ({})", MAX_PAGE_NUMBER));
+                    return Err(format!(
+                        "Page number exceeds maximum allowed limit ({})",
+                        MAX_PAGE_NUMBER
+                    ));
                 }
                 for p in start..=end {
                     if page_set.len() >= MAX_PAGE_COUNT {
-                        return Err(format!("Total selected pages exceed maximum allowed limit ({})", MAX_PAGE_COUNT));
+                        return Err(format!(
+                            "Total selected pages exceed maximum allowed limit ({})",
+                            MAX_PAGE_COUNT
+                        ));
                     }
                     page_set.insert(p - 1);
                 }
@@ -65,10 +71,16 @@ impl PageRange {
                     return Err("Page numbers must be 1-based (>= 1, got 0)".to_string());
                 }
                 if p > MAX_PAGE_NUMBER {
-                    return Err(format!("Page number exceeds maximum allowed limit ({})", MAX_PAGE_NUMBER));
+                    return Err(format!(
+                        "Page number exceeds maximum allowed limit ({})",
+                        MAX_PAGE_NUMBER
+                    ));
                 }
                 if page_set.len() >= MAX_PAGE_COUNT {
-                    return Err(format!("Total selected pages exceed maximum allowed limit ({})", MAX_PAGE_COUNT));
+                    return Err(format!(
+                        "Total selected pages exceed maximum allowed limit ({})",
+                        MAX_PAGE_COUNT
+                    ));
                 }
                 page_set.insert(p - 1);
             }

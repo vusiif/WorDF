@@ -18,13 +18,13 @@ use std::fmt;
 
 pub use analyze::{analyze_document, DocumentAnalysis};
 pub use compat::*;
-pub use metadata::DocumentMetadata;
-pub use pages::PageRange;
 pub use font::{
     count_cjk_chars, embedded_cjk_font_bytes, embedded_cjk_font_names, is_cjk_char,
     FallbackFontItem, FontCmap, FontFallbackChain, Format12Group, Format4Subtable,
     EMBEDDED_CJK_FONT_BYTES, EMBEDDED_CJK_FONT_NAME, EMBEDDED_CJK_FONT_NAME_ALT,
 };
+pub use metadata::DocumentMetadata;
+pub use pages::PageRange;
 
 /// Input format explicit declaration or automatic detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -169,7 +169,8 @@ pub fn convert(
         None => input,
     };
 
-    let (fmt, mut pre_warnings) = format::verify_and_detect_format(effective_input, options.format)?;
+    let (fmt, mut pre_warnings) =
+        format::verify_and_detect_format(effective_input, options.format)?;
 
     let mut output = match fmt {
         InputFormat::Doc => backend::convert_doc_route_b(effective_input, options)?,

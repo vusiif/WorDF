@@ -11,6 +11,8 @@ use crate::format::docx::validate_docx_package;
 use crate::format::{DOC_MAGIC, ZIP_MAGIC};
 use crate::{ConversionError, ConversionErrorKind, ConversionOptions, Diagnostic};
 
+mod render;
+
 /// Comprehensive document structural and typographical analysis summary.
 #[derive(Debug, Clone)]
 pub struct DocumentAnalysis {
@@ -29,64 +31,13 @@ pub struct DocumentAnalysis {
     pub warnings: Vec<Diagnostic>,
 }
 
-impl DocumentAnalysis {
-    /// Formats the analysis results into a human-readable terminal summary.
-    pub fn render_console_summary(&self, input_name: &str) -> String {
-        let mut out = String::new();
-        out.push_str("==================================================\n          WorDF Document Analysis Report          \n==================================================\n");
-        out.push_str(&format!("Target File: {}\nFile Size:   {} bytes ({:.2} KiB)\nFormat:      {}\n", input_name, self.input_bytes, self.input_bytes as f64 / 1024.0, self.format_name));
-        if !self.metadata.is_empty() {
-            out.push_str("\n[Document Metadata]\n");
-            if let Some(ref t) = self.metadata.title { out.push_str(&format!("  - Title:             {}\n", t)); }
-            if let Some(ref a) = self.metadata.author { out.push_str(&format!("  - Author:            {}\n", a)); }
-            if let Some(ref s) = self.metadata.subject { out.push_str(&format!("  - Subject:           {}\n", s)); }
-            if let Some(ref k) = self.metadata.keywords { out.push_str(&format!("  - Keywords:          {}\n", k)); }
-        }
-        out.push_str("\n[Structure & Layout]\n");
-        out.push_str(&format!("  - Paragraphs:        {}\n", self.paragraph_count));
-        out.push_str(&format!("  - Tables:            {}\n", self.table_count));
-        out.push_str(&format!("  - Text Runs:         {}\n", self.run_count));
-        out.push_str(&format!("  - Embedded Media:    {} files ({:.2} KiB)\n", self.media_count, self.media_bytes as f64 / 1024.0));
-        out.push_str(&format!("  - Header/Footers:    {} part(s)\n", self.header_footer_count));
-
-        out.push_str("\n[Typography & Fonts]\n");
-        out.push_str(&format!("  - East Asian Chars:  {}\n", self.cjk_char_count));
-        if !self.detected_fonts.is_empty() {
-            out.push_str(&format!("  - Declared Fonts:    {}\n", self.detected_fonts.join(", ")));
-        } else {
-            out.push_str("  - Declared Fonts:    (Default style hierarchy)\n");
-        }
-
-        if self.missing_glyphs.is_empty() {
-            out.push_str("  - Glyph Coverage:    OK (All East Asian characters supported)\n");
-        } else {
-            out.push_str(&format!(
-                "  - Missing Glyphs:    {} glyph(s) missing in fallback font: [{}]\n",
-                self.missing_glyphs.len(),
-                self.missing_glyphs.iter().take(10).map(|c| format!("'{}' (U+{:04X})", c, *c as u32)).collect::<Vec<_>>().join(", ")
-            ));
-        }
-
-        out.push_str("\n[Diagnostics & Risk Evaluation]\n");
-        if self.warnings.is_empty() {
-            out.push_str("  - Status: READY (No structural or typographic conflicts detected)\n");
-        } else {
-            out.push_str(&format!("  - Status: {} Warning(s) Detected\n", self.warnings.len()));
-            for w in &self.warnings {
-                out.push_str(&format!("    * [{}] {}\n", w.code, w.message));
-            }
-        }
-        out.push_str("==================================================\n");
-        out
-    }
-}
-
 /// Analyze a DOC or DOCX document in-memory without invoking full PDF rendering.
 pub fn analyze_document(
     bytes: &[u8],
     options: &ConversionOptions,
 ) -> Result<DocumentAnalysis, ConversionError> {
-    let decrypted_holder = crate::crypto::decrypt_office_document(bytes, options.password.as_deref())?;
+    let decrypted_holder =
+        crate::crypto::decrypt_office_document(bytes, options.password.as_deref())?;
     let effective_bytes = decrypted_holder.as_deref().unwrap_or(bytes);
     if effective_bytes.starts_with(&ZIP_MAGIC) {
         analyze_docx_package(effective_bytes, options)
@@ -95,7 +46,9 @@ pub fn analyze_document(
     } else {
         Err(ConversionError {
             kind: ConversionErrorKind::UnsupportedFormat,
-            message: "Unsupported file format: expected OOXML DOCX (PK..) or Word 97-2003 DOC (CFB)".to_string(),
+            message:
+                "Unsupported file format: expected OOXML DOCX (PK..) or Word 97-2003 DOC (CFB)"
+                    .to_string(),
         })
     }
 }
@@ -120,17 +73,14 @@ fn analyze_docx_package(
     let mut warnings = Vec::new();
 
     // Font cmap lookup if font is available
-    let fallback_font_bytes: Option<&[u8]> = options
-        .fallback_font_bytes
-        .as_deref()
-        .or_else(|| {
-            let b = crate::font::embedded_cjk_font_bytes();
-            if b.is_empty() {
-                None
-            } else {
-                Some(b)
-            }
-        });
+    let fallback_font_bytes: Option<&[u8]> = options.fallback_font_bytes.as_deref().or_else(|| {
+        let b = crate::font::embedded_cjk_font_bytes();
+        if b.is_empty() {
+            None
+        } else {
+            Some(b)
+        }
+    });
     let font_cmap = fallback_font_bytes.and_then(FontCmap::from_bytes);
 
     let mut checked_chars = HashSet::new();
@@ -153,13 +103,19 @@ fn analyze_docx_package(
         if name == "word/fontTable.xml" {
             let mut font_xml = String::new();
             let max_aux = crate::format::docx::MAX_DOCX_AUX_XML_BYTES;
-            if (&mut file).take(max_aux + 1).read_to_string(&mut font_xml).is_ok() && (font_xml.len() as u64) <= max_aux {
+            if (&mut file)
+                .take(max_aux + 1)
+                .read_to_string(&mut font_xml)
+                .is_ok()
+                && (font_xml.len() as u64) <= max_aux
+            {
                 let mut cursor = 0;
                 while let Some(pos) = font_xml[cursor..].find("<w:font ") {
                     let tag_start = cursor + pos;
                     if let Some(tag_end_rel) = font_xml[tag_start..].find('>') {
                         let tag = &font_xml[tag_start..tag_start + tag_end_rel];
-                        if let Some(val) = crate::docx_adapt::extract_attribute_value(tag, "w:name") {
+                        if let Some(val) = crate::docx_adapt::extract_attribute_value(tag, "w:name")
+                        {
                             let font_name = val.to_string();
                             if !detected_fonts.contains(&font_name) {
                                 detected_fonts.push(font_name);
@@ -176,7 +132,11 @@ fn analyze_docx_package(
         if crate::docx_adapt::is_text_part(&name) {
             let mut xml_content = String::new();
             let max_main = crate::format::docx::MAX_DOCX_MAIN_XML_BYTES;
-            if (&mut file).take(max_main + 1).read_to_string(&mut xml_content).is_ok() {
+            if (&mut file)
+                .take(max_main + 1)
+                .read_to_string(&mut xml_content)
+                .is_ok()
+            {
                 if xml_content.len() as u64 > max_main {
                     return Err(ConversionError {
                         kind: ConversionErrorKind::ResourceLimit,
@@ -194,7 +154,9 @@ fn analyze_docx_package(
                         if is_cjk_char(c) && checked_chars.insert(c) {
                             let is_covered = if let Some(ref chain) = options.fallback_chain {
                                 chain.resolve_glyph(c).is_some()
-                            } else if let (Some(cmap), Some(f_bytes)) = (&font_cmap, fallback_font_bytes) {
+                            } else if let (Some(cmap), Some(f_bytes)) =
+                                (&font_cmap, fallback_font_bytes)
+                            {
                                 cmap.has_glyph(c, f_bytes)
                             } else {
                                 true
@@ -242,7 +204,10 @@ fn analyze_docx_package(
     })
 }
 
-fn analyze_doc_package(bytes: &[u8], options: &ConversionOptions) -> Result<DocumentAnalysis, ConversionError> {
+fn analyze_doc_package(
+    bytes: &[u8],
+    options: &ConversionOptions,
+) -> Result<DocumentAnalysis, ConversionError> {
     validate_doc_package(bytes)?;
 
     let mut stream_count = 0;

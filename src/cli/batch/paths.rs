@@ -12,15 +12,18 @@ pub fn compute_output_pdf_path(
     input_base: &Path,
     output_base: &Path,
 ) -> Option<PathBuf> {
-    let stem = in_path.file_stem()?.to_str()?;
+    // OsString-based stem keeps non-UTF-8 file names convertible (e.g. GBK names on Linux).
+    let stem = in_path.file_stem()?;
+    let mut file_name = stem.to_os_string();
+    file_name.push(".pdf");
     if let Ok(rel) = in_path.strip_prefix(input_base) {
         if let Some(rel_parent) = rel.parent() {
             if !rel_parent.as_os_str().is_empty() {
-                return Some(output_base.join(rel_parent).join(format!("{}.pdf", stem)));
+                return Some(output_base.join(rel_parent).join(file_name));
             }
         }
     }
-    Some(output_base.join(format!("{}.pdf", stem)))
+    Some(output_base.join(file_name))
 }
 
 /// Collects Word document paths from a directory, optionally traversing recursively.

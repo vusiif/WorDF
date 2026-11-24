@@ -591,10 +591,17 @@ fn test_case_15_chinese_docx_cli_default_embedded_font() {
         .output()
         .expect("Failed to execute wordf binary");
 
-    assert_eq!(output.status.code(), Some(0), "CLI conversion with default embedded font must succeed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "CLI conversion with default embedded font must succeed"
+    );
     assert!(out_pdf.exists(), "Output PDF must exist");
     let pdf_bytes = fs::read(&out_pdf).unwrap();
-    assert!(pdf_bytes.starts_with(b"%PDF-"), "Output PDF must have valid header");
+    assert!(
+        pdf_bytes.starts_with(b"%PDF-"),
+        "Output PDF must have valid header"
+    );
     assert!(pdf_bytes.len() > 100, "Output PDF must not be truncated");
 
     assert!(report_json.exists(), "JSON report must exist");
@@ -618,7 +625,11 @@ fn test_case_16_chinese_docx_unsupported_glyph_fails_fast_exit_3() {
     let out_pdf = dir.join("cjk_unsupported_out.pdf");
 
     let unmapped_char = '\u{2A6D0}';
-    fs::write(&input, make_test_docx(&format!("包含生僻字{}测试", unmapped_char))).unwrap();
+    fs::write(
+        &input,
+        make_test_docx(&format!("包含生僻字{}测试", unmapped_char)),
+    )
+    .unwrap();
 
     let output = Command::new(&bin)
         .arg(&input)
@@ -628,8 +639,15 @@ fn test_case_16_chinese_docx_unsupported_glyph_fails_fast_exit_3() {
         .output()
         .expect("Failed to execute wordf binary");
 
-    assert_eq!(output.status.code(), Some(3), "Missing font glyph must fail fast with exit code 3");
-    assert!(!out_pdf.exists(), "Output PDF must not be committed on fail-fast error");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "Missing font glyph must fail fast with exit code 3"
+    );
+    assert!(
+        !out_pdf.exists(),
+        "Output PDF must not be committed on fail-fast error"
+    );
 
     let stderr_str = String::from_utf8_lossy(&output.stderr);
     assert!(stderr_str.contains("Font diagnostic failure"));
@@ -721,7 +739,11 @@ fn test_case_19_batch_directory_conversion_scoped_concurrency() {
         .output()
         .expect("Failed to execute wordf binary");
 
-    assert_eq!(output.status.code(), Some(0), "Batch conversion must succeed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Batch conversion must succeed"
+    );
     assert!(out_dir.join("doc_a.pdf").exists(), "doc_a.pdf must exist");
     assert!(out_dir.join("doc_b.pdf").exists(), "doc_b.pdf must exist");
     assert!(out_dir.join("doc_c.pdf").exists(), "doc_c.pdf must exist");
@@ -758,7 +780,11 @@ fn test_case_20_batch_directory_conversion_report_json() {
         .output()
         .expect("Failed to execute wordf binary");
 
-    assert_eq!(output.status.code(), Some(0), "Batch conversion must succeed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Batch conversion must succeed"
+    );
     assert!(out_dir.join("alpha.pdf").exists(), "alpha.pdf must exist");
     assert!(out_dir.join("beta.pdf").exists(), "beta.pdf must exist");
     assert!(report_json.exists(), "batch_summary.json must be generated");
@@ -793,7 +819,11 @@ fn test_case_21_batch_recursive_directory_conversion() {
         .output()
         .expect("Failed to execute wordf binary");
 
-    assert_eq!(output.status.code(), Some(0), "Recursive batch conversion must succeed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Recursive batch conversion must succeed"
+    );
     assert!(out_dir.join("root.pdf").exists(), "root.pdf must exist");
     let nested_pdf = out_dir.join("sub_a").join("nested_b").join("leaf.pdf");
     assert!(
@@ -893,7 +923,10 @@ fn test_case_24_cli_strict_mode_rejects_warnings() {
         Some(0),
         "Regular mode should succeed despite extension mismatch warning"
     );
-    assert!(out_non_strict.exists(), "Regular mode must produce output PDF");
+    assert!(
+        out_non_strict.exists(),
+        "Regular mode must produce output PDF"
+    );
 
     // 2. Strict conversion must reject warning and abort without writing PDF (exit code 3)
     let output_strict = Command::new(&bin)
@@ -994,11 +1027,17 @@ fn test_case_26_batch_resume_incremental_conversion() {
     assert_eq!(out2.status.code(), Some(0));
 
     let rep2 = fs::read_to_string(&rep_json).unwrap();
-    assert!(rep2.contains(r#""skipped": 2"#), "Both files must be skipped when up-to-date");
+    assert!(
+        rep2.contains(r#""skipped": 2"#),
+        "Both files must be skipped when up-to-date"
+    );
     assert!(rep2.contains(r#""succeeded": 0"#));
 
     let pdf1_mtime_after_skip = pdf1.metadata().unwrap().modified().unwrap();
-    assert_eq!(pdf1_mtime_init, pdf1_mtime_after_skip, "Up-to-date PDF must not be re-written");
+    assert_eq!(
+        pdf1_mtime_init, pdf1_mtime_after_skip,
+        "Up-to-date PDF must not be re-written"
+    );
 
     // 3. Update doc1 only, run again with --resume -> doc1 converted, doc2 skipped
     std::thread::sleep(std::time::Duration::from_millis(150));
@@ -1016,11 +1055,20 @@ fn test_case_26_batch_resume_incremental_conversion() {
     assert_eq!(out3.status.code(), Some(0));
 
     let rep3 = fs::read_to_string(&rep_json).unwrap();
-    assert!(rep3.contains(r#""succeeded": 1"#), "Modified document must be converted");
-    assert!(rep3.contains(r#""skipped": 1"#), "Unmodified document must be skipped");
+    assert!(
+        rep3.contains(r#""succeeded": 1"#),
+        "Modified document must be converted"
+    );
+    assert!(
+        rep3.contains(r#""skipped": 1"#),
+        "Unmodified document must be skipped"
+    );
 
     let pdf1_mtime_updated = pdf1.metadata().unwrap().modified().unwrap();
-    assert!(pdf1_mtime_updated > pdf1_mtime_init, "Modified doc1.pdf must be updated");
+    assert!(
+        pdf1_mtime_updated > pdf1_mtime_init,
+        "Modified doc1.pdf must be updated"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1211,7 +1259,8 @@ fn build_minimal_ttf_format12(char_code: u32) -> Vec<u8> {
     buf.extend_from_slice(&1u32.to_be_bytes()); // glyph id 1
 
     let total_table_len = buf.len() - (table_offset as usize);
-    buf[cmap_tag_offset + 12..cmap_tag_offset + 16].copy_from_slice(&(total_table_len as u32).to_be_bytes());
+    buf[cmap_tag_offset + 12..cmap_tag_offset + 16]
+        .copy_from_slice(&(total_table_len as u32).to_be_bytes());
 
     buf
 }
@@ -1300,10 +1349,7 @@ fn make_multipage_docx(pages: &[&str]) -> Vec<u8> {
             if i > 0 {
                 body_content.push_str(r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#);
             }
-            body_content.push_str(&format!(
-                r#"<w:p><w:r><w:t>{}</w:t></w:r></w:p>"#,
-                text
-            ));
+            body_content.push_str(&format!(r#"<w:p><w:r><w:t>{}</w:t></w:r></w:p>"#, text));
         }
         let doc_xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1334,7 +1380,11 @@ fn test_case_32_cli_pages_slice_export() {
 
     fs::write(
         &in_file,
-        make_multipage_docx(&["First page content", "Second page content", "Third page content"]),
+        make_multipage_docx(&[
+            "First page content",
+            "Second page content",
+            "Third page content",
+        ]),
     )
     .unwrap();
 
@@ -1352,7 +1402,10 @@ fn test_case_32_cli_pages_slice_export() {
     assert_eq!(out1.status.code(), Some(0));
     assert!(out_p2.exists());
     let rep1_str = fs::read_to_string(&rep_p2).unwrap();
-    assert!(rep1_str.contains(r#""page_count": 1"#), "Extracted single page must have page_count 1");
+    assert!(
+        rep1_str.contains(r#""page_count": 1"#),
+        "Extracted single page must have page_count 1"
+    );
 
     // 2. Page range slice: --pages 1-2
     let out2 = Command::new(&bin)
@@ -1368,7 +1421,10 @@ fn test_case_32_cli_pages_slice_export() {
     assert_eq!(out2.status.code(), Some(0));
     assert!(out_p12.exists());
     let rep2_str = fs::read_to_string(&rep_p12).unwrap();
-    assert!(rep2_str.contains(r#""page_count": 2"#), "Extracted page range 1-2 must have page_count 2");
+    assert!(
+        rep2_str.contains(r#""page_count": 2"#),
+        "Extracted page range 1-2 must have page_count 2"
+    );
 
     // 3. Page range exceeding document total pages: --pages 5 -> exit code 3
     let out3 = Command::new(&bin)
@@ -1430,7 +1486,11 @@ fn test_case_33_encrypted_docx_cli_scenarios() {
         .arg(&out_no_pwd)
         .output()
         .expect("Failed to execute wordf without password");
-    assert_eq!(out1.status.code(), Some(3), "Missing password must fail with exit code 3");
+    assert_eq!(
+        out1.status.code(),
+        Some(3),
+        "Missing password must fail with exit code 3"
+    );
     assert!(!out_no_pwd.exists(), "Output PDF must not be created");
     let stderr1 = String::from_utf8_lossy(&out1.stderr);
     assert!(stderr1.contains("password-protected") || stderr1.contains("--password"));
@@ -1444,7 +1504,11 @@ fn test_case_33_encrypted_docx_cli_scenarios() {
         .arg("IncorrectPass")
         .output()
         .expect("Failed to execute wordf with wrong password");
-    assert_eq!(out2.status.code(), Some(3), "Wrong password must fail with exit code 3");
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "Wrong password must fail with exit code 3"
+    );
     assert!(!out_wrong_pwd.exists(), "Output PDF must not be created");
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
     assert!(stderr2.contains("Incorrect password"));
@@ -1458,7 +1522,11 @@ fn test_case_33_encrypted_docx_cli_scenarios() {
         .arg(password)
         .output()
         .expect("Failed to execute wordf with correct password");
-    assert_eq!(out3.status.code(), Some(0), "Correct password must succeed with exit code 0");
+    assert_eq!(
+        out3.status.code(),
+        Some(0),
+        "Correct password must succeed with exit code 0"
+    );
     assert!(out_correct.exists(), "Output PDF must exist");
     let pdf_bytes = fs::read(&out_correct).unwrap();
     assert!(pdf_bytes.starts_with(b"%PDF-"));
@@ -1490,7 +1558,9 @@ fn test_case_33_encrypted_docx_cli_scenarios() {
 
     {
         let mut stdin = child.stdin.take().expect("Failed to open stdin");
-        stdin.write_all(&encrypted_cfb).expect("Failed to write to stdin");
+        stdin
+            .write_all(&encrypted_cfb)
+            .expect("Failed to write to stdin");
     }
 
     let out5 = child.wait_with_output().expect("Failed to wait on child");
@@ -1508,7 +1578,11 @@ fn test_case_34_cli_metadata_injection_and_pdf_info() {
     let out_file = dir.join("meta.pdf");
     let report_file = dir.join("meta_analysis.json");
 
-    fs::write(&in_file, make_test_docx("Metadata CLI verification test document.")).unwrap();
+    fs::write(
+        &in_file,
+        make_test_docx("Metadata CLI verification test document."),
+    )
+    .unwrap();
 
     // 1. Conversion with --title, --author, --subject, --keywords
     let output = Command::new(&bin)
@@ -1558,6 +1632,252 @@ fn test_case_34_cli_metadata_injection_and_pdf_info() {
     let rep_str = fs::read_to_string(&report_file).unwrap();
     assert!(rep_str.contains("Analysis Title"));
     assert!(rep_str.contains("Analysis Author"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_35_oversized_file_input_exits_6() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case35_oversize_file");
+    let input = dir.join("huge.docx");
+    // Sparse-enough 129 MiB placeholder: only metadata is read before rejection.
+    let f = fs::File::create(&input).unwrap();
+    f.set_len(129 * 1024 * 1024).unwrap();
+    drop(f);
+    let out_pdf = dir.join("out.pdf");
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("-o")
+        .arg(&out_pdf)
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(6),
+        "Oversized input (129 MiB) must exit with code 6 (resource budget), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exceeds maximum limit"),
+        "Rejection message must name the size limit"
+    );
+    assert!(
+        !out_pdf.exists(),
+        "No PDF must be committed for oversized input"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_36_oversized_stdin_exits_6() {
+    let bin = get_bin_path();
+    // Exactly MAX_INPUT_BYTES + 1, matching the bounded stdin read in single.rs.
+    let payload = vec![0u8; 128 * 1024 * 1024 + 1];
+
+    let mut child = Command::new(&bin)
+        .arg("-")
+        .arg("-o")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn wordf pipeline");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&payload)
+        .expect("Failed to write oversized payload to stdin");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("Failed to wait for wordf");
+
+    assert_eq!(
+        output.status.code(),
+        Some(6),
+        "Oversized stdin must exit with code 6 (resource budget), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "No PDF bytes may be written to stdout when input is rejected"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_case_37_stdout_route_report_failure_returns_9() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case37_stdout_report_failure");
+    let input = dir.join("doc.docx");
+    fs::write(&input, make_test_docx("stdout route report failure")).unwrap();
+
+    let report_dir = dir.join("report_out");
+    fs::create_dir_all(&report_dir).unwrap();
+    let out_report = report_dir.join("out.json");
+
+    // Read-only report directory: temp file creation fails after PDF delivery.
+    fs::set_permissions(&report_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("-o")
+        .arg("-")
+        .arg("--report-json")
+        .arg(&out_report)
+        .output()
+        .expect("Failed to execute wordf binary");
+
+    assert!(
+        output.stdout.starts_with(b"%PDF-"),
+        "PDF must still be delivered to stdout before the report failure"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "Report failure after stdout delivery must exit with code 9, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("report_commit_failed"),
+        "Report failure must be reported on stderr, not swallowed"
+    );
+
+    // Restore permissions for cleanup
+    let _ = fs::set_permissions(&report_dir, fs::Permissions::from_mode(0o755));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_case_38_batch_case_variant_collision_rejects() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case38_case_collision");
+    let input_dir = dir.join("input");
+    let output_dir = dir.join("output");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+
+    fs::write(
+        input_dir.join("Mixed.docx"),
+        make_test_docx("case variant A"),
+    )
+    .unwrap();
+    fs::write(
+        input_dir.join("mixed.doc"),
+        make_test_docx("case variant B"),
+    )
+    .unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&output_dir)
+        .output()
+        .expect("Failed to execute wordf batch");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "Case-variant outputs colliding on a case-insensitive filesystem must be rejected with exit 2, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output_dir.join("Mixed.pdf").exists(),
+        "No output may be committed when a collision is detected"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_case_39_batch_case_variant_outputs_distinct() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case39_case_distinct");
+    let input_dir = dir.join("input");
+    let output_dir = dir.join("output");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+
+    fs::write(
+        input_dir.join("Mixed.docx"),
+        make_test_docx("case variant A"),
+    )
+    .unwrap();
+    fs::write(
+        input_dir.join("mixed.doc"),
+        make_test_docx("case variant B"),
+    )
+    .unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&output_dir)
+        .output()
+        .expect("Failed to execute wordf batch");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Distinct case-variant outputs must convert on case-sensitive filesystems, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output_dir.join("Mixed.pdf").exists() && output_dir.join("mixed.pdf").exists(),
+        "Both distinct PDFs must be committed"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_case_40_batch_symlink_output_rejected_and_preserved() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case40_batch_symlink");
+    let input_dir = dir.join("input");
+    let output_dir = dir.join("output");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+
+    fs::write(input_dir.join("doc.docx"), make_test_docx("symlink guard")).unwrap();
+    let target = dir.join("elsewhere.bin");
+    fs::write(&target, b"precious").unwrap();
+    std::os::unix::fs::symlink(&target, output_dir.join("doc.pdf")).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&output_dir)
+        .arg("--overwrite")
+        .output()
+        .expect("Failed to execute wordf batch");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Symlink destination must fail the batch item, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let link_meta = fs::symlink_metadata(output_dir.join("doc.pdf")).unwrap();
+    assert!(
+        link_meta.is_symlink(),
+        "Symlink destination must be rejected, not silently replaced"
+    );
+    assert_eq!(
+        fs::read(&target).unwrap(),
+        b"precious",
+        "Symlink target content must stay untouched"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

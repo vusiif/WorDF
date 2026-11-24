@@ -3,21 +3,22 @@
 //! License: GPL-3.0-or-later
 
 pub mod paths;
+mod report;
 pub mod worker;
 
 pub use paths::{compute_output_pdf_path, discover_word_documents_ext, MAX_BATCH_WORKERS};
+use report::commit_batch_report;
 use worker::{execute_batch_item, BatchTaskResult};
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use wordf::report::{format_batch_report_json, BatchItemReport, BatchReportData};
-use wordf::transaction::{atomic_commit_rename, create_exclusive_temp_file};
+use wordf::report::BatchItemReport;
+use wordf::transaction::validate_output_target;
 use wordf::ConversionOptions;
 
 pub struct BatchConfig {
@@ -50,18 +51,36 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
 
     if !config.output_dir.exists() {
         if let Err(e) = fs::create_dir_all(&config.output_dir) {
-            eprintln!("Error: Failed to create output directory {:?}: {}", config.output_dir, e);
+            eprintln!(
+                "Error: Failed to create output directory {:?}: {}",
+                config.output_dir, e
+            );
             return Err(2);
         }
     } else if !config.output_dir.is_dir() {
-        eprintln!("Error: Target output path {:?} exists but is not a directory.", config.output_dir);
+        eprintln!(
+            "Error: Target output path {:?} exists but is not a directory.",
+            config.output_dir
+        );
         return Err(2);
+    }
+
+    // Fail fast on an invalid JSON report target before any conversion work.
+    if let Some(rep_path) = &config.report_json {
+        let allow_rep_overwrite = config.overwrite || config.resume;
+        if let Err(msg) = validate_output_target(rep_path, allow_rep_overwrite, "JSON report") {
+            eprintln!("Error: {}", msg);
+            return Err(4);
+        }
     }
 
     let mut files = match discover_word_documents_ext(&config.input_dir, config.recursive) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Error reading input directory {:?}: {}", config.input_dir, e);
+            eprintln!(
+                "Error reading input directory {:?}: {}",
+                config.input_dir, e
+            );
             return Err(4);
         }
     };
@@ -75,7 +94,10 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
     let total = files.len();
     if total == 0 {
         if !config.quiet {
-            eprintln!("WorDF: No '.doc' or '.docx' files found in directory {:?}", config.input_dir);
+            eprintln!(
+                "WorDF: No '.doc' or '.docx' files found in directory {:?}",
+                config.input_dir
+            );
         }
         return Ok(BatchSummary {
             total: 0,
@@ -88,8 +110,18 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
 
     let mut target_map: HashMap<String, PathBuf> = HashMap::new();
     for in_path in &files {
-        if let Some(target) = compute_output_pdf_path(in_path, &config.input_dir, &config.output_dir) {
-            let target_key = target.to_string_lossy().to_lowercase();
+        if let Some(target) =
+            compute_output_pdf_path(in_path, &config.input_dir, &config.output_dir)
+        {
+            // Case folding only where the filesystem folds case, mirroring
+            // validate::check_future_target_alias. Case-sensitive filesystems
+            // must not reject outputs that are genuinely distinct files.
+            let normalized = target.to_string_lossy();
+            let target_key = if cfg!(windows) {
+                normalized.to_ascii_lowercase()
+            } else {
+                normalized.into_owned()
+            };
             if let Some(prev) = target_map.insert(target_key, in_path.clone()) {
                 eprintln!(
                     "Error: Output filename collision detected between {:?} and {:?} (both map to {:?})",
@@ -100,9 +132,11 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
         }
     }
 
-    let worker_count = config
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    let worker_count = config.jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
     let worker_count = worker_count.max(1).min(total).min(MAX_BATCH_WORKERS);
 
     if config.verbose {
@@ -120,14 +154,14 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
 
     std::thread::scope(|s| {
         for _ in 0..worker_count {
-            s.spawn(|| {
-                loop {
-                    let idx = next_index.fetch_add(1, Ordering::Relaxed);
-                    if idx >= total {
-                        break;
-                    }
-                    let in_path = &files[idx];
-                    let out_pdf = match compute_output_pdf_path(in_path, &config.input_dir, &config.output_dir) {
+            s.spawn(|| loop {
+                let idx = next_index.fetch_add(1, Ordering::Relaxed);
+                if idx >= total {
+                    break;
+                }
+                let in_path = &files[idx];
+                let out_pdf =
+                    match compute_output_pdf_path(in_path, &config.input_dir, &config.output_dir) {
                         Some(p) => p,
                         None => {
                             failed_count.fetch_add(1, Ordering::Relaxed);
@@ -143,30 +177,48 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
                         }
                     };
 
-                    match execute_batch_item(in_path, out_pdf, config) {
-                        BatchTaskResult::Succeeded { item, total_ms, pages, out_pdf } => {
-                            succeeded_count.fetch_add(1, Ordering::Relaxed);
-                            items.lock().unwrap().push(item);
-                            if config.verbose {
-                                eprintln!(
-                                    "[verbose] [{}/{}] Converted {:?} -> {:?} ({} pages, {:.2}ms)",
-                                    idx + 1, total, in_path.file_name().unwrap_or_default(),
-                                    out_pdf.file_name().unwrap_or_default(), pages, total_ms
-                                );
-                            }
+                match execute_batch_item(in_path, out_pdf, config) {
+                    BatchTaskResult::Succeeded {
+                        item,
+                        total_ms,
+                        pages,
+                        out_pdf,
+                    } => {
+                        succeeded_count.fetch_add(1, Ordering::Relaxed);
+                        items.lock().unwrap().push(item);
+                        if config.verbose {
+                            eprintln!(
+                                "[verbose] [{}/{}] Converted {:?} -> {:?} ({} pages, {:.2}ms)",
+                                idx + 1,
+                                total,
+                                in_path.file_name().unwrap_or_default(),
+                                out_pdf.file_name().unwrap_or_default(),
+                                pages,
+                                total_ms
+                            );
                         }
-                        BatchTaskResult::Skipped { item } => {
-                            skipped_count.fetch_add(1, Ordering::Relaxed);
-                            if config.verbose {
-                                let reason = if config.resume { "target PDF is up-to-date" } else { "output already exists" };
-                                eprintln!("[verbose] [{}/{}] Skipped {:?} ({})", idx + 1, total, in_path.file_name().unwrap_or_default(), reason);
-                            }
-                            items.lock().unwrap().push(item);
+                    }
+                    BatchTaskResult::Skipped { item } => {
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        if config.verbose {
+                            let reason = if config.resume {
+                                "target PDF is up-to-date"
+                            } else {
+                                "output already exists"
+                            };
+                            eprintln!(
+                                "[verbose] [{}/{}] Skipped {:?} ({})",
+                                idx + 1,
+                                total,
+                                in_path.file_name().unwrap_or_default(),
+                                reason
+                            );
                         }
-                        BatchTaskResult::Failed { item } => {
-                            failed_count.fetch_add(1, Ordering::Relaxed);
-                            items.lock().unwrap().push(item);
-                        }
+                        items.lock().unwrap().push(item);
+                    }
+                    BatchTaskResult::Failed { item } => {
+                        failed_count.fetch_add(1, Ordering::Relaxed);
+                        items.lock().unwrap().push(item);
                     }
                 }
             });
@@ -185,47 +237,24 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
         );
     }
 
-    let summary = BatchSummary { total, succeeded, failed, skipped, elapsed_ms };
+    let summary = BatchSummary {
+        total,
+        succeeded,
+        failed,
+        skipped,
+        elapsed_ms,
+    };
 
     if let Some(ref rep_path) = config.report_json {
-        let mut collected_items = items.into_inner().unwrap();
-        collected_items.sort_by(|a, b| a.input_path.cmp(&b.input_path));
-
-        let report_data = BatchReportData {
-            tool_name: "wordf",
-            tool_version: "1.0.0",
-            total,
-            succeeded,
-            failed,
-            skipped,
-            elapsed_ms,
-            items: &collected_items,
-        };
-        let report_json_str = format_batch_report_json(&report_data);
-
-        let mut rep_guard = create_exclusive_temp_file(rep_path, "rep")?;
-
-        if let Err(e) = rep_guard.file.write_all(report_json_str.as_bytes()) {
-            rep_guard.cleanup();
-            eprintln!("Error writing batch report JSON {:?}: {}", rep_path, e);
-            return Err(4);
-        }
-        if let Err(e) = rep_guard.file.flush() {
-            rep_guard.cleanup();
-            eprintln!("Error flushing batch report JSON {:?}: {}", rep_path, e);
-            return Err(4);
-        }
-
-        let allow_rep_overwrite = config.overwrite || config.resume;
-        if let Err(e) = atomic_commit_rename(&rep_guard.path, rep_path, allow_rep_overwrite) {
-            rep_guard.cleanup();
-            eprintln!("Error committing batch report JSON {:?}: {}", rep_path, e);
-            return Err(4);
-        }
-        rep_guard.committed = true;
+        let collected_items = items.into_inner().unwrap();
+        commit_batch_report(rep_path, config, &summary, collected_items)?;
     }
 
-    if failed > 0 { Err(1) } else { Ok(summary) }
+    if failed > 0 {
+        Err(1)
+    } else {
+        Ok(summary)
+    }
 }
 
 #[cfg(test)]

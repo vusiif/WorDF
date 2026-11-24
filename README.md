@@ -18,7 +18,7 @@ WorDF performs conversion without depending on LibreOffice, Microsoft Office, or
 
 ## Rust Core Library Public API
 
-The core library provides a pure-memory byte-level API that does not touch the filesystem, does not spawn background processes, and produces no standard I/O side effects:
+The core library provides a pure-memory byte-level API: input bytes are read and output bytes are produced entirely in memory, it does not spawn background processes, and it produces no standard I/O side effects. Font resolution may read system font directories and maintain an on-disk font cache (see Font Architecture below).
 
 ```rust
 use wordf::{convert, ConversionOptions, InputFormat, ConversionErrorKind};
@@ -72,9 +72,16 @@ wordf --version
 ```
 
 ### Options
-- `-o, --output <path>`: Required output PDF file path, or output directory when input is a directory (`-` stdout rejected).
+- `-o, --output <path>`: Required output PDF file path, or output directory when input is a directory. `-` streams the PDF to stdout (single-file mode only; rejected for directory batch input and for JSON reports).
 - `--format <auto|doc|docx>`: Explicit format declaration (default: `auto`).
 - `--overwrite`: Allow replacing existing regular destination files. Default is race-safe no-clobber.
+- `--strict`: Fail with a non-zero exit code if any diagnostic warning is present (no PDF is delivered).
+- `--analyze`: Inspect and diagnose document compatibility without generating a PDF (no `-o` required).
+- `--pages <RANGE>`: Export only the specified pages (e.g. `1-3`, `2`, `1-3,5,8-10`).
+- `--password <string>`: Decryption password for password-protected documents.
+- `--title|--author|--subject|--keywords <string>`: Inject PDF metadata overrides.
+- `--resume`: Skip conversion when the target PDF already exists and is newer than the input.
+- `-r, --recursive`: Recursively scan subdirectories in batch directory conversion.
 - `--report-json <path>`: Optional path to write a machine-readable JSON execution report (`-` rejected).
 - `--font-path <path>`: Optional local font file or directory for offline font injection.
 - `-j, --jobs <N>`: Worker thread count for batch directory conversion (default: logical CPU count, zero external dependencies).
@@ -91,14 +98,15 @@ wordf --version
 | Exit Code | Meaning | Destination PDF State |
 |:---:|---|:---:|
 | **0** | Conversion and all requested outputs committed successfully | Committed |
-| **2** | CLI argument errors, alias conflicts, stdin/stdout `-`, deprecated P0 syntax | Not committed |
+| **1** | Batch directory conversion finished with at least one failed document (per-file results are in the batch summary / JSON report) | Mixed (per-file) |
+| **2** | CLI argument errors, alias conflicts, `-` used for a JSON report or for batch-mode output, deprecated P0 syntax | Not committed |
 | **3** | Unsupported format, explicit format mismatch, encrypted file, missing font glyph | Not committed |
 | **4** | File I/O, parent directory missing, existing file without `--overwrite`, symlink target | Not committed |
 | **5** | Corrupt or invalid Word container / stream | Not committed |
 | **6** | Defensible resource budget exceeded (size, entries, ratio, pixels) | Not committed |
 | **7** | User cancellation (reserved) | Not committed |
 | **8** | Internal backend failure, zero-page PDF output | Not committed |
-| **9** | PDF committed successfully, but requested JSON report commit failed | **Committed** |
+| **9** | PDF(s) committed successfully, but the requested JSON report commit failed (single-file and batch routes) | **Committed** |
 
 ---
 
@@ -108,7 +116,7 @@ WorDF enforces filesystem boundaries to prevent accidental data loss:
 1. **Physical Entity Isolation**: Input file, output PDF, and JSON report must be distinct file entities. Hard links, symlinks, and aliases pointing to the same file entity are rejected before conversion.
 2. **Non-existent Target Collision**: Distinct non-existent output paths resolving to the same parent directory and filename are rejected with exit code 2.
 3. **Symlink Rejection**: Destination PDF and report paths must not be symlinks; symlinks are rejected with exit code 4.
-4. **Parent Directory Existence**: Output parent directories must exist; WorDF does not create directories implicitly.
+4. **Parent Directory Existence**: Single-file mode requires output parent directories to exist and never creates them implicitly. Batch mode creates the output directory (and recursive subdirectories) when it is absent.
 5. **Two-Phase Commit**:
    - *Phase 1*: Outputs are staged into unpredictable, exclusive temporary files (`.wordf_tmp_*`) in the target's parent directory with `0600` permissions (or Windows secure exclusive handles).
    - *Phase 2 (Atomic Commit)*:

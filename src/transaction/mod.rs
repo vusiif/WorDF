@@ -11,7 +11,9 @@ pub use executor::{TaskError, TaskExecutor, TaskFileConfig, TaskResult};
 pub use temp_file::{
     create_exclusive_temp_file, generate_unpredictable_temp_name, os_random_bytes, TempFileGuard,
 };
-pub use validate::{validate_and_isolate_targets, TargetPaths, ValidatedTargets};
+pub use validate::{
+    validate_and_isolate_targets, validate_output_target, TargetPaths, ValidatedTargets,
+};
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +29,10 @@ mod tests {
         os_random_bytes(&mut buf1).expect("os_random_bytes must succeed");
         os_random_bytes(&mut buf2).expect("os_random_bytes must succeed");
         assert_ne!(buf1, [0u8; 16], "OS random bytes must not be all zeros");
-        assert_ne!(buf1, buf2, "Consecutive OS random byte reads must be independent");
+        assert_ne!(
+            buf1, buf2,
+            "Consecutive OS random byte reads must be independent"
+        );
 
         let name1 = generate_unpredictable_temp_name("pdf").expect("Must generate name");
         let name2 = generate_unpredictable_temp_name("pdf").expect("Must generate name");
@@ -52,7 +57,11 @@ mod tests {
         {
             use std::os::unix::fs::MetadataExt;
             let meta = fs::metadata(&guard.path).expect("File metadata must exist");
-            assert_eq!(meta.mode() & 0o777, 0o600, "Temporary file must have 0600 permissions");
+            assert_eq!(
+                meta.mode() & 0o777,
+                0o600,
+                "Temporary file must have 0600 permissions"
+            );
         }
 
         #[cfg(unix)]
@@ -64,29 +73,47 @@ mod tests {
             let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
             let ret = unsafe { libc::fstat(fd, &mut stat_buf) };
             assert_eq!(ret, 0, "fstat on retained handle must succeed");
-            assert_eq!(meta.ino(), stat_buf.st_ino as u64, "Retained file handle must match on-disk inode");
-            assert_eq!(meta.dev(), stat_buf.st_dev as u64, "Retained file handle must match on-disk device");
+            assert_eq!(
+                meta.ino(),
+                stat_buf.st_ino as u64,
+                "Retained file handle must match on-disk inode"
+            );
+            assert_eq!(
+                meta.dev(),
+                stat_buf.st_dev as u64,
+                "Retained file handle must match on-disk device"
+            );
         }
 
         let payload = b"Direct write test via retained handle without reopening";
-        guard.file.write_all(payload).expect("Write to retained handle must succeed");
+        guard
+            .file
+            .write_all(payload)
+            .expect("Write to retained handle must succeed");
         guard.file.flush().unwrap();
         guard.file.sync_all().unwrap();
 
         let disk_bytes = fs::read(&guard.path).expect("Read from path must succeed");
-        assert_eq!(disk_bytes, payload, "File content written via handle must match on-disk bytes");
+        assert_eq!(
+            disk_bytes, payload,
+            "File content written via handle must match on-disk bytes"
+        );
 
         let temp_path = guard.path.clone();
         assert!(temp_path.exists());
         drop(guard);
-        assert!(!temp_path.exists(), "Uncommitted temp file must be cleaned up on drop");
+        assert!(
+            !temp_path.exists(),
+            "Uncommitted temp file must be cleaned up on drop"
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_atomic_commit_no_clobber_and_failure_cleanup() {
-        let temp_dir = std::env::temp_dir().join(format!("wordf_test_tx_noclobber_{}", process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("wordf_test_tx_noclobber_{}", process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -102,11 +129,22 @@ mod tests {
         let temp_path = guard.path.clone();
 
         let commit_res = commit_two_phase(&mut guard, &target, None, None, false);
-        assert_eq!(commit_res, Err(4), "Commit without overwrite against existing file must fail");
+        assert_eq!(
+            commit_res,
+            Err(4),
+            "Commit without overwrite against existing file must fail"
+        );
 
-        assert_eq!(fs::read(&target).unwrap(), existing_data, "Existing target content must be untouched");
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            existing_data,
+            "Existing target content must be untouched"
+        );
 
-        assert!(!temp_path.exists(), "Failed commit must clean up temp file without leftovers");
+        assert!(
+            !temp_path.exists(),
+            "Failed commit must clean up temp file without leftovers"
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

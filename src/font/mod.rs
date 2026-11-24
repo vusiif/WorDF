@@ -10,7 +10,7 @@ use std::ops::Deref;
 use std::sync::OnceLock;
 
 pub use chain::{FallbackFontItem, FontFallbackChain};
-pub use cmap::{get_or_init_embedded_font_cmap, FontCmap, Format12Group, Format4Subtable};
+pub use cmap::{FontCmap, Format12Group, Format4Subtable};
 pub use family::extract_font_family_names;
 
 /// Built-in fallback font primary family name.
@@ -25,7 +25,8 @@ pub fn has_embedded_cjk_font() -> bool {
 }
 
 #[cfg(feature = "embedded-cjk-font")]
-const COMPRESSED_FONT_PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lxgw_wenkai_lite.zst"));
+const COMPRESSED_FONT_PAYLOAD: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/lxgw_wenkai_lite.zst"));
 
 #[cfg(feature = "embedded-cjk-font")]
 static DECOMPRESSED_FONT_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -117,6 +118,16 @@ pub fn count_cjk_chars(text: &str) -> usize {
         return 0;
     }
     text.chars().filter(|&c| is_cjk_char(c)).count()
+}
+
+static EMBEDDED_FONT_CMAP: std::sync::OnceLock<Option<FontCmap>> = std::sync::OnceLock::new();
+
+/// Returns pre-parsed, cached FontCmap for the embedded font bytes,
+/// ensuring Format 4 and Format 12 tables are parsed at most once across the process lifetime.
+pub fn get_or_init_embedded_font_cmap(embedded_bytes: &[u8]) -> Option<&'static FontCmap> {
+    EMBEDDED_FONT_CMAP
+        .get_or_init(|| FontCmap::from_bytes(embedded_bytes))
+        .as_ref()
 }
 
 #[cfg(test)]

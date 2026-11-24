@@ -4,14 +4,40 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use wordf::report::BatchItemReport;
-use wordf::transaction::{TaskError, TaskExecutor, TaskFileConfig};
 use super::BatchConfig;
+use wordf::report::BatchItemReport;
+use wordf::transaction::{
+    is_same_file, validate_output_target, TaskError, TaskExecutor, TaskFileConfig,
+};
+
+/// Build a failed batch item and surface the reason on stderr.
+fn failed_item(in_path: &Path, out_pdf: &Path, msg: String) -> BatchTaskResult {
+    eprintln!("Error: {}", msg);
+    BatchTaskResult::Failed {
+        item: BatchItemReport {
+            input_path: in_path.to_string_lossy().to_string(),
+            output_path: out_pdf.to_string_lossy().to_string(),
+            status: "failed".to_string(),
+            page_count: 0,
+            elapsed_ms: 0.0,
+            error: Some(msg),
+        },
+    }
+}
 
 pub enum BatchTaskResult {
-    Succeeded { item: BatchItemReport, total_ms: f64, pages: u32, out_pdf: PathBuf },
-    Skipped { item: BatchItemReport },
-    Failed { item: BatchItemReport },
+    Succeeded {
+        item: BatchItemReport,
+        total_ms: f64,
+        pages: u32,
+        out_pdf: PathBuf,
+    },
+    Skipped {
+        item: BatchItemReport,
+    },
+    Failed {
+        item: BatchItemReport,
+    },
 }
 
 pub fn execute_batch_item(
@@ -27,20 +53,25 @@ pub fn execute_batch_item(
 
     let in_meta = match in_path.metadata() {
         Ok(m) => m,
-        Err(e) => {
-            eprintln!("Error reading metadata for {:?}: {}", in_path, e);
-            return BatchTaskResult::Failed {
-                item: BatchItemReport {
-                    input_path: in_path.to_string_lossy().to_string(),
-                    output_path: out_pdf.to_string_lossy().to_string(),
-                    status: "failed".to_string(),
-                    page_count: 0,
-                    elapsed_ms: 0.0,
-                    error: Some(format!("Metadata error: {}", e)),
-                },
-            };
-        }
+        Err(e) => return failed_item(in_path, &out_pdf, format!("Metadata error: {}", e)),
     };
+
+    // Destination safety aligned with single-file mode: reject symlink and
+    // directory destinations as well as output/input entity aliases before any
+    // conversion work happens.
+    if let Err(msg) = validate_output_target(&out_pdf, true, "PDF output") {
+        return failed_item(in_path, &out_pdf, msg);
+    }
+    if is_same_file(&out_pdf, in_path) {
+        return failed_item(
+            in_path,
+            &out_pdf,
+            format!(
+                "Output PDF {:?} points to the same file entity as input {:?}",
+                out_pdf, in_path
+            ),
+        );
+    }
 
     let should_skip = if config.resume {
         if out_pdf.exists() {

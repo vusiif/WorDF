@@ -105,14 +105,23 @@ fn test_normalize_parent_dir_bare_filename() {
     let bare = Path::new("bare_font.ttf");
     assert_eq!(bare.parent(), Some(Path::new("")));
     let normalized = normalize_parent_dir(bare.parent());
-    assert!(!normalized.as_os_str().is_empty(), "Normalized path must not be empty");
+    assert!(
+        !normalized.as_os_str().is_empty(),
+        "Normalized path must not be empty"
+    );
     assert_ne!(normalized, PathBuf::from(""));
 
     let with_dir = Path::new("fonts/bare_font.ttf");
-    assert_eq!(normalize_parent_dir(with_dir.parent()), PathBuf::from("fonts"));
+    assert_eq!(
+        normalize_parent_dir(with_dir.parent()),
+        PathBuf::from("fonts")
+    );
 
     let abs_path = Path::new("/usr/share/fonts/bare_font.ttf");
-    assert_eq!(normalize_parent_dir(abs_path.parent()), PathBuf::from("/usr/share/fonts"));
+    assert_eq!(
+        normalize_parent_dir(abs_path.parent()),
+        PathBuf::from("/usr/share/fonts")
+    );
 }
 
 #[test]
@@ -124,7 +133,10 @@ fn test_inspect_fonts_with_bare_file() {
     let fonts = inspect_fonts(Some(&font_path.to_string_lossy().to_string())).unwrap();
     assert!(fonts.font_dir.is_some());
     let dir = fonts.font_dir.unwrap();
-    assert!(!dir.as_os_str().is_empty(), "font_dir must never be empty string");
+    assert!(
+        !dir.as_os_str().is_empty(),
+        "font_dir must never be empty string"
+    );
 
     let _ = fs::remove_file(&font_path);
 }
@@ -133,7 +145,11 @@ fn test_inspect_fonts_with_bare_file() {
 fn test_inspect_fonts_rejects_nonexistent_explicit_path() {
     let fake_path = "nonexistent_font_path_xyz_12345.ttf".to_string();
     let res = inspect_fonts(Some(&fake_path));
-    assert_eq!(res.err(), Some(4), "Explicit font path that does not exist must return exit code 4");
+    assert_eq!(
+        res.err(),
+        Some(4),
+        "Explicit font path that does not exist must return exit code 4"
+    );
 }
 
 #[test]

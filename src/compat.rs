@@ -104,13 +104,19 @@ pub fn convert_route_c_docx_docxide_with_font_bytes(
     convert_docx_route_c_compat(bytes, &opts)
 }
 
-fn convert_doc_route_b_compat(bytes: &[u8], opts: &ConversionOptions) -> Result<(Vec<u8>, Vec<String>), String> {
+fn convert_doc_route_b_compat(
+    bytes: &[u8],
+    opts: &ConversionOptions,
+) -> Result<(Vec<u8>, Vec<String>), String> {
     let out = backend::convert_doc_route_b(bytes, opts).map_err(|e| e.to_string())?;
     let warns = out.warnings.into_iter().map(|w| w.message).collect();
     Ok((out.pdf, warns))
 }
 
-fn convert_docx_route_c_compat(bytes: &[u8], opts: &ConversionOptions) -> Result<(Vec<u8>, Vec<String>), String> {
+fn convert_docx_route_c_compat(
+    bytes: &[u8],
+    opts: &ConversionOptions,
+) -> Result<(Vec<u8>, Vec<String>), String> {
     let out = backend::convert_docx_route_c(bytes, opts).map_err(|e| e.to_string())?;
     let warns = out.warnings.into_iter().map(|w| w.message).collect();
     Ok((out.pdf, warns))
@@ -153,6 +159,10 @@ pub fn count_cjk_in_xml_text_nodes(xml: &str) -> usize {
     docx_adapt::count_cjk_in_xml_text_nodes(xml)
 }
 
-pub fn adapt_xml_text(xml: &str, fallback_font: &str, available_fonts: &[String]) -> (String, usize) {
+pub fn adapt_xml_text(
+    xml: &str,
+    fallback_font: &str,
+    available_fonts: &[String],
+) -> (String, usize) {
     docx_adapt::adapt_xml_text(xml, fallback_font, available_fonts)
 }

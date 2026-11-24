@@ -94,7 +94,11 @@ pub fn is_same_dir(p_a: &Path, p_b: &Path, meta_a: &fs::Metadata, meta_b: &fs::M
 /// Atomically rename `old_path` to `new_path`.
 /// If `overwrite` is false, use RENAME_NOREPLACE (or Windows MoveFileExW without MOVEFILE_REPLACE_EXISTING)
 /// to prevent clobbering existing files.
-pub fn atomic_commit_rename(old_path: &Path, new_path: &Path, overwrite: bool) -> Result<(), io::Error> {
+pub fn atomic_commit_rename(
+    old_path: &Path,
+    new_path: &Path,
+    overwrite: bool,
+) -> Result<(), io::Error> {
     #[cfg(unix)]
     {
         use std::ffi::CString;
@@ -125,13 +129,8 @@ pub fn atomic_commit_rename(old_path: &Path, new_path: &Path, overwrite: bool) -
             };
 
             #[cfg(target_os = "macos")]
-            let ret = unsafe {
-                libc::renamex_np(
-                    old_c.as_ptr(),
-                    new_c.as_ptr(),
-                    libc::RENAME_EXCL,
-                )
-            };
+            let ret =
+                unsafe { libc::renamex_np(old_c.as_ptr(), new_c.as_ptr(), libc::RENAME_EXCL) };
 
             #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
             let ret = {
@@ -156,8 +155,16 @@ pub fn atomic_commit_rename(old_path: &Path, new_path: &Path, overwrite: bool) -
     {
         use std::os::windows::ffi::OsStrExt;
 
-        let old_w: Vec<u16> = old_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let new_w: Vec<u16> = new_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let old_w: Vec<u16> = old_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let new_w: Vec<u16> = new_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         extern "system" {
             fn MoveFileExW(

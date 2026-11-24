@@ -1,7 +1,9 @@
 //! DOCX styles.xml parser and document-default CJK font injection.
 //! License: GPL-3.0-or-later
 
-use super::xml::{escape_xml_attr, extract_attribute_value, find_tag_closing_bracket, update_or_insert_attribute};
+use super::xml::{
+    escape_xml_attr, extract_attribute_value, find_tag_closing_bracket, update_or_insert_attribute,
+};
 
 pub fn is_styles_part(name: &str) -> bool {
     name == "word/styles.xml"
@@ -31,11 +33,16 @@ pub fn adapt_styles_xml(
                     let rf_tag = &result[abs_rf_start..=abs_rf_end];
 
                     let already_has_cjk = extract_attribute_value(rf_tag, "w:eastAsia")
-                        .map(|font_name| available_fonts.iter().any(|f| f.eq_ignore_ascii_case(font_name)))
+                        .map(|font_name| {
+                            available_fonts
+                                .iter()
+                                .any(|f| f.eq_ignore_ascii_case(font_name))
+                        })
                         .unwrap_or(false);
 
                     if !already_has_cjk {
-                        let updated_rf = update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
+                        let updated_rf =
+                            update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
 
                         let mut new_xml = String::with_capacity(result.len() + 64);
                         new_xml.push_str(&result[..abs_rf_start]);
@@ -95,11 +102,16 @@ pub fn adapt_styles_xml(
                         let rf_tag = &result[abs_rf_start..=abs_rf_end];
 
                         let already_has_cjk = extract_attribute_value(rf_tag, "w:eastAsia")
-                            .map(|font_name| available_fonts.iter().any(|f| f.eq_ignore_ascii_case(font_name)))
+                            .map(|font_name| {
+                                available_fonts
+                                    .iter()
+                                    .any(|f| f.eq_ignore_ascii_case(font_name))
+                            })
                             .unwrap_or(false);
 
                         if !already_has_cjk {
-                            let updated_rf = update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
+                            let updated_rf =
+                                update_or_insert_attribute(rf_tag, "w:eastAsia", fallback_font);
 
                             let mut new_xml = String::with_capacity(result.len() + 64);
                             new_xml.push_str(&result[..abs_rf_start]);
@@ -131,8 +143,14 @@ mod tests {
     fn test_adapt_styles_update_existing_rfonts_preserving_ascii() {
         let styles = r#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#;
         let adapted = adapt_styles_xml(styles, "SimSun", &[]);
-        assert!(adapted.contains(r#"w:ascii="Calibri""#), "West-European font must be preserved");
-        assert!(adapted.contains(r#"w:eastAsia="SimSun""#), "East Asian font must be injected");
+        assert!(
+            adapted.contains(r#"w:ascii="Calibri""#),
+            "West-European font must be preserved"
+        );
+        assert!(
+            adapted.contains(r#"w:eastAsia="SimSun""#),
+            "East Asian font must be injected"
+        );
     }
 
     #[test]
@@ -150,6 +168,9 @@ mod tests {
         let styles = r#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:eastAsia="SimHei"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#;
         let available = vec!["SimHei".to_string()];
         let adapted = adapt_styles_xml(styles, "SimSun", &available);
-        assert_eq!(adapted, styles, "Must not overwrite existing available Chinese font");
+        assert_eq!(
+            adapted, styles,
+            "Must not overwrite existing available Chinese font"
+        );
     }
 }

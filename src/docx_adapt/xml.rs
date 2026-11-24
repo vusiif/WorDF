@@ -2,8 +2,8 @@
 //! License: GPL-3.0-or-later
 
 pub use super::xml_util::{
-    count_cjk_in_xml_text_nodes, escape_xml_attr, extract_attribute_value, find_tag_closing_bracket,
-    for_each_xml_text_node, is_text_part, update_or_insert_attribute,
+    count_cjk_in_xml_text_nodes, escape_xml_attr, extract_attribute_value,
+    find_tag_closing_bracket, for_each_xml_text_node, is_text_part, update_or_insert_attribute,
 };
 use crate::font::count_cjk_chars;
 
@@ -24,7 +24,11 @@ pub fn adapt_run_xml(run_xml: &str, fallback_font: &str, available_fonts: &[Stri
 }
 
 /// Injects or updates `w:eastAsia` assuming CJK characters have already been identified.
-fn adapt_run_xml_prescanned(run_xml: &str, fallback_font: &str, available_fonts: &[String]) -> String {
+fn adapt_run_xml_prescanned(
+    run_xml: &str,
+    fallback_font: &str,
+    available_fonts: &[String],
+) -> String {
     // 1. Check if <w:rFonts exists
     if let Some(rfonts_idx) = run_xml.find("<w:rFonts") {
         let rfonts_start = rfonts_idx;
@@ -35,7 +39,11 @@ fn adapt_run_xml_prescanned(run_xml: &str, fallback_font: &str, available_fonts:
             let rfonts_tag = &run_xml[rfonts_start..=abs_rfonts_end];
 
             let already_has_cjk_font = extract_attribute_value(rfonts_tag, "w:eastAsia")
-                .map(|font_name| available_fonts.iter().any(|f| f.eq_ignore_ascii_case(font_name)))
+                .map(|font_name| {
+                    available_fonts
+                        .iter()
+                        .any(|f| f.eq_ignore_ascii_case(font_name))
+                })
                 .unwrap_or(false);
 
             if already_has_cjk_font {
@@ -67,7 +75,10 @@ fn adapt_run_xml_prescanned(run_xml: &str, fallback_font: &str, available_fonts:
                 let mut result = String::with_capacity(run_xml.len() + 64);
                 result.push_str(&run_xml[..rpr_idx]);
                 result.push_str(open_prefix);
-                result.push_str(&format!(r#"><w:rFonts w:eastAsia="{}"/></w:rPr>"#, escaped_font));
+                result.push_str(&format!(
+                    r#"><w:rFonts w:eastAsia="{}"/></w:rPr>"#,
+                    escaped_font
+                ));
                 result.push_str(&run_xml[abs_tag_end + 1..]);
                 return result;
             }
@@ -159,7 +170,8 @@ pub fn adapt_xml_text(
                     let cjk_count = count_cjk_in_xml_text_nodes(run_slice);
                     total_cjk += cjk_count;
                     if cjk_count > 0 {
-                        let adapted = adapt_run_xml_prescanned(run_slice, fallback_font, available_fonts);
+                        let adapted =
+                            adapt_run_xml_prescanned(run_slice, fallback_font, available_fonts);
                         out.push_str(&adapted);
                     } else {
                         out.push_str(run_slice);
@@ -184,18 +196,27 @@ mod tests {
 
     #[test]
     fn test_skip_xml_comment_containing_fake_run() {
-        let xml = r#"<w:p><!-- <w:r><w:t>注释中的中文</w:t></w:r> --><w:r><w:t>正文</w:t></w:r></w:p>"#;
+        let xml =
+            r#"<w:p><!-- <w:r><w:t>注释中的中文</w:t></w:r> --><w:r><w:t>正文</w:t></w:r></w:p>"#;
         let (adapted, count) = adapt_xml_text(xml, "SimSun", &[]);
-        assert_eq!(count, 2, "Only real run text should be counted, not comments");
+        assert_eq!(
+            count, 2,
+            "Only real run text should be counted, not comments"
+        );
         assert!(adapted.contains("<!-- <w:r><w:t>注释中的中文</w:t></w:r> -->"));
-        assert!(adapted.contains(r#"<w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>正文</w:t>"#));
+        assert!(
+            adapted.contains(r#"<w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>正文</w:t>"#)
+        );
     }
 
     #[test]
     fn test_single_quoted_and_spaced_attributes_no_panic() {
         let run = "<w:r><w:rFonts w:ascii='Calibri' w:eastAsia = 'OldFont' /><w:t>测试</w:t></w:r>";
         let adapted = adapt_run_xml(run, "SimSun", &[]);
-        assert!(adapted.contains(r#"w:eastAsia="SimSun""#) || adapted.contains(r#"w:eastAsia = 'SimSun'"#));
+        assert!(
+            adapted.contains(r#"w:eastAsia="SimSun""#)
+                || adapted.contains(r#"w:eastAsia = 'SimSun'"#)
+        );
         assert!(!adapted.contains("OldFont"));
     }
 
@@ -219,8 +240,14 @@ mod tests {
         let run = r#"<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>中文测试</w:t></w:r>"#;
         let available = vec!["Arial".to_string()];
         let adapted = adapt_run_xml(run, "SimSun", &available);
-        assert!(adapted.contains(r#"w:eastAsia="SimSun""#), "Must inject East Asian fallback even if Arial is available");
-        assert!(adapted.contains(r#"w:ascii="Arial""#), "Must preserve original western font");
+        assert!(
+            adapted.contains(r#"w:eastAsia="SimSun""#),
+            "Must inject East Asian fallback even if Arial is available"
+        );
+        assert!(
+            adapted.contains(r#"w:ascii="Arial""#),
+            "Must preserve original western font"
+        );
     }
 
     #[test]

@@ -118,27 +118,37 @@ pub fn inject_docx_metadata(
         let name = file.name().to_string();
 
         if name == "docProps/core.xml" {
-            zip_writer.start_file(&name, opt).map_err(|e| ConversionError {
-                kind: ConversionErrorKind::Internal,
-                message: format!("Error writing core.xml: {}", e),
-            })?;
-            zip_writer.write_all(new_core_xml.as_bytes()).map_err(|e| ConversionError {
-                kind: ConversionErrorKind::Internal,
-                message: format!("Error writing core.xml: {}", e),
-            })?;
+            zip_writer
+                .start_file(&name, opt)
+                .map_err(|e| ConversionError {
+                    kind: ConversionErrorKind::Internal,
+                    message: format!("Error writing core.xml: {}", e),
+                })?;
+            zip_writer
+                .write_all(new_core_xml.as_bytes())
+                .map_err(|e| ConversionError {
+                    kind: ConversionErrorKind::Internal,
+                    message: format!("Error writing core.xml: {}", e),
+                })?;
             replaced_core = true;
             continue;
         }
 
         let mut data = Vec::new();
-        (&mut file).take(crate::format::docx::MAX_DOCX_TOTAL_UNCOMPRESSED_BYTES + 1).read_to_end(&mut data).map_err(|e| ConversionError {
-            kind: ConversionErrorKind::CorruptInput,
-            message: format!("Error reading content of {}: {}", name, e),
-        })?;
+        (&mut file)
+            .take(crate::format::docx::MAX_DOCX_TOTAL_UNCOMPRESSED_BYTES + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| ConversionError {
+                kind: ConversionErrorKind::CorruptInput,
+                message: format!("Error reading content of {}: {}", name, e),
+            })?;
         if data.len() as u64 > crate::format::docx::MAX_DOCX_TOTAL_UNCOMPRESSED_BYTES {
             return Err(ConversionError {
                 kind: ConversionErrorKind::ResourceLimit,
-                message: format!("ZIP entry '{}' decompressed size exceeds resource limit", name),
+                message: format!(
+                    "ZIP entry '{}' decompressed size exceeds resource limit",
+                    name
+                ),
             });
         }
 
@@ -166,10 +176,12 @@ pub fn inject_docx_metadata(
             }
         }
 
-        zip_writer.start_file(&name, opt).map_err(|e| ConversionError {
-            kind: ConversionErrorKind::Internal,
-            message: format!("Error writing entry {}: {}", name, e),
-        })?;
+        zip_writer
+            .start_file(&name, opt)
+            .map_err(|e| ConversionError {
+                kind: ConversionErrorKind::Internal,
+                message: format!("Error writing entry {}: {}", name, e),
+            })?;
         zip_writer.write_all(&data).unwrap();
     }
 

@@ -4,8 +4,8 @@
 pub mod agile;
 pub mod cipher;
 
-use std::io::{Cursor, Read};
 use crate::{ConversionError, ConversionErrorKind};
+use std::io::{Cursor, Read};
 
 /// CFB / OLE2 compound document magic header bytes.
 pub const CFB_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
@@ -52,7 +52,9 @@ pub fn decrypt_office_document(
                 }
                 let mut pkg_bytes = Vec::new();
                 if let Ok(s) = comp.open_stream("/EncryptedPackage") {
-                    let _ = s.take(crate::format::MAX_INPUT_BYTES as u64 + 1).read_to_end(&mut pkg_bytes);
+                    let _ = s
+                        .take(crate::format::MAX_INPUT_BYTES as u64 + 1)
+                        .read_to_end(&mut pkg_bytes);
                 }
 
                 let decrypted = agile::decrypt_agile_package(&info_bytes, &pkg_bytes, pwd)?;

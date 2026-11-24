@@ -21,21 +21,33 @@ pub fn print_help() {
     println!("  wordf --version");
     println!();
     println!("Options:");
-    println!("  -o, --output <path>       Output PDF path (or directory when input is a directory)");
+    println!(
+        "  -o, --output <path>       Output PDF path (or directory when input is a directory)"
+    );
     println!("      --format <FORMAT>     Expected input format: auto (default), doc, or docx");
     println!("      --overwrite           Allow overwriting existing ordinary output files");
     println!("      --strict              Fail with non-zero exit code on any diagnostic warning");
     println!("      --analyze             Inspect and diagnose document compatibility without generating PDF");
-    println!("      --pages <RANGE>       Export specific page ranges (e.g. '1-3', '2', '1-3,5,8-10')");
+    println!(
+        "      --pages <RANGE>       Export specific page ranges (e.g. '1-3', '2', '1-3,5,8-10')"
+    );
     println!("      --password <string>   Decryption password for password-protected documents");
-    println!("      --title <string>      Set or override document Title metadata in generated PDF");
+    println!(
+        "      --title <string>      Set or override document Title metadata in generated PDF"
+    );
     println!("      --author <string>     Set or override document Author/Creator metadata in generated PDF");
-    println!("      --subject <string>    Set or override document Subject metadata in generated PDF");
-    println!("      --keywords <string>   Set or override document Keywords metadata in generated PDF");
+    println!(
+        "      --subject <string>    Set or override document Subject metadata in generated PDF"
+    );
+    println!(
+        "      --keywords <string>   Set or override document Keywords metadata in generated PDF"
+    );
     println!("      --resume              Skip conversion if target PDF already exists and is newer than input");
     println!("      --report-json <path>  Emit machine-readable JSON execution report");
     println!("      --font-path <path>    Local font file or directory for offline CJK injection");
-    println!("  -j, --jobs <N>            Worker threads for batch conversion (default: logical CPUs)");
+    println!(
+        "  -j, --jobs <N>            Worker threads for batch conversion (default: logical CPUs)"
+    );
     println!("  -r, --recursive           Recursively scan subdirectories in batch conversion");
     println!("  -q, --quiet               Suppress all diagnostic warnings on stderr");
     println!("  -v, --verbose             Print detailed phase timings and diagnostics to stderr");
@@ -117,7 +129,10 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
                 "doc" => parsed.format = InputFormat::Doc,
                 "docx" => parsed.format = InputFormat::Docx,
                 other => {
-                    eprintln!("Error: Unknown format '{}'. Expected 'auto', 'doc', or 'docx'", other);
+                    eprintln!(
+                        "Error: Unknown format '{}'. Expected 'auto', 'doc', or 'docx'",
+                        other
+                    );
                     return Err(2);
                 }
             }
@@ -211,7 +226,10 @@ pub fn parse_cli_args() -> Result<CliArgs, i32> {
             let jobs_val = match args[i].to_string_lossy().parse::<usize>() {
                 Ok(n) if n > 0 => n,
                 _ => {
-                    eprintln!("Error: Invalid jobs count '{}'. Expected positive integer.", args[i].to_string_lossy());
+                    eprintln!(
+                        "Error: Invalid jobs count '{}'. Expected positive integer.",
+                        args[i].to_string_lossy()
+                    );
                     return Err(2);
                 }
             };

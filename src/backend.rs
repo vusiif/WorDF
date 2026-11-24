@@ -2,7 +2,9 @@
 //! License: GPL-3.0-or-later
 
 use crate::docx_adapt::adapt_docx_cjk_in_memory_with_bytes;
-use crate::{ConversionError, ConversionErrorKind, ConversionOptions, ConversionOutput, Diagnostic};
+use crate::{
+    ConversionError, ConversionErrorKind, ConversionOptions, ConversionOutput, Diagnostic,
+};
 
 pub fn convert_doc_route_b(
     bytes: &[u8],
@@ -113,24 +115,25 @@ pub fn convert_docx_route_c(
         _ => adapted_docx.into_owned(),
     };
 
-    let (pdf_bytes, raw_page_count) = docxide_pdf::convert_docx_bytes_to_pdf_bytes_with_page_filter(
-        &final_docx,
-        options.pages.as_deref(),
-    )
-    .map_err(|e| {
-        let msg = format!("docxide-pdf render error: {:?}", e);
-        if msg.contains("out of range") {
-            ConversionError {
-                kind: ConversionErrorKind::PageOutOfRange,
-                message: msg,
+    let (pdf_bytes, raw_page_count) =
+        docxide_pdf::convert_docx_bytes_to_pdf_bytes_with_page_filter(
+            &final_docx,
+            options.pages.as_deref(),
+        )
+        .map_err(|e| {
+            let msg = format!("docxide-pdf render error: {:?}", e);
+            if msg.contains("out of range") {
+                ConversionError {
+                    kind: ConversionErrorKind::PageOutOfRange,
+                    message: msg,
+                }
+            } else {
+                ConversionError {
+                    kind: ConversionErrorKind::BackendFailure,
+                    message: msg,
+                }
             }
-        } else {
-            ConversionError {
-                kind: ConversionErrorKind::BackendFailure,
-                message: msg,
-            }
-        }
-    })?;
+        })?;
 
     if raw_page_count == 0 {
         return Err(ConversionError {

@@ -12,8 +12,14 @@ pub fn format_analysis_json(analysis: &DocumentAnalysis) -> String {
         warnings_json.push_str("[\n");
         for (i, w) in analysis.warnings.iter().enumerate() {
             warnings_json.push_str("      {\n");
-            warnings_json.push_str(&format!("        \"code\": \"{}\",\n", escape_json_str(&w.code)));
-            warnings_json.push_str(&format!("        \"message\": \"{}\"\n", escape_json_str(&w.message)));
+            warnings_json.push_str(&format!(
+                "        \"code\": \"{}\",\n",
+                escape_json_str(&w.code)
+            ));
+            warnings_json.push_str(&format!(
+                "        \"message\": \"{}\"\n",
+                escape_json_str(&w.message)
+            ));
             if i + 1 < analysis.warnings.len() {
                 warnings_json.push_str("      },\n");
             } else {
@@ -26,7 +32,11 @@ pub fn format_analysis_json(analysis: &DocumentAnalysis) -> String {
     let fonts_json = if analysis.detected_fonts.is_empty() {
         "[]".to_string()
     } else {
-        let list: Vec<String> = analysis.detected_fonts.iter().map(|f| format!("\"{}\"", escape_json_str(f))).collect();
+        let list: Vec<String> = analysis
+            .detected_fonts
+            .iter()
+            .map(|f| format!("\"{}\"", escape_json_str(f)))
+            .collect();
         format!("[{}]", list.join(", "))
     };
 
@@ -43,10 +53,30 @@ pub fn format_analysis_json(analysis: &DocumentAnalysis) -> String {
 
     let meta_json = format!(
         "{{\"title\":{},\"author\":{},\"subject\":{},\"keywords\":{}}}",
-        analysis.metadata.title.as_ref().map(|s| format!("\"{}\"", escape_json_str(s))).unwrap_or_else(|| "null".to_string()),
-        analysis.metadata.author.as_ref().map(|s| format!("\"{}\"", escape_json_str(s))).unwrap_or_else(|| "null".to_string()),
-        analysis.metadata.subject.as_ref().map(|s| format!("\"{}\"", escape_json_str(s))).unwrap_or_else(|| "null".to_string()),
-        analysis.metadata.keywords.as_ref().map(|s| format!("\"{}\"", escape_json_str(s))).unwrap_or_else(|| "null".to_string()),
+        analysis
+            .metadata
+            .title
+            .as_ref()
+            .map(|s| format!("\"{}\"", escape_json_str(s)))
+            .unwrap_or_else(|| "null".to_string()),
+        analysis
+            .metadata
+            .author
+            .as_ref()
+            .map(|s| format!("\"{}\"", escape_json_str(s)))
+            .unwrap_or_else(|| "null".to_string()),
+        analysis
+            .metadata
+            .subject
+            .as_ref()
+            .map(|s| format!("\"{}\"", escape_json_str(s)))
+            .unwrap_or_else(|| "null".to_string()),
+        analysis
+            .metadata
+            .keywords
+            .as_ref()
+            .map(|s| format!("\"{}\"", escape_json_str(s)))
+            .unwrap_or_else(|| "null".to_string()),
     );
 
     format!(
@@ -93,7 +123,11 @@ pub fn format_analysis_json(analysis: &DocumentAnalysis) -> String {
         analysis.cjk_char_count,
         fonts_json,
         missing_glyphs_json,
-        if analysis.warnings.is_empty() { "ok" } else { "warnings_found" },
+        if analysis.warnings.is_empty() {
+            "ok"
+        } else {
+            "warnings_found"
+        },
         warnings_json
     )
 }

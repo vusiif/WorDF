@@ -14,6 +14,7 @@ pub struct TargetPaths {
 }
 
 pub struct ValidatedTargets {
+    /// Input path as provided by the caller (kept verbatim, not canonicalized).
     pub input_canonical: PathBuf,
     pub output_pdf_path: PathBuf,
     pub report_json_path: Option<PathBuf>,
@@ -24,6 +25,7 @@ pub struct ValidatedTargets {
 /// Returns Ok(ValidatedTargets) or exits with the appropriate exit code:
 /// - Exit code 2: Parameter/alias conflict, same file entity, or non-existent target collision.
 /// - Exit code 4: File I/O, parent directory missing, symlink target rejected, or output exists without --overwrite.
+/// - Exit code 6: Input exceeds the 128 MiB defensible resource budget.
 pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTargets, i32> {
     let input_path = &targets.input_path;
     let is_stdin = input_path.as_os_str() == "-";
@@ -50,7 +52,7 @@ pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTar
                 input_meta.len(),
                 crate::format::MAX_INPUT_BYTES
             );
-            return Err(4);
+            return Err(6);
         }
     }
 
@@ -60,7 +62,10 @@ pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTar
     // 2. Immediate alias checks against input
     if !is_stdin && !is_stdout {
         if fs::metadata(pdf_path).is_ok() && is_same_file(pdf_path, input_path) {
-            eprintln!("Error: Output PDF {:?} points to the same file entity as input.", pdf_path);
+            eprintln!(
+                "Error: Output PDF {:?} points to the same file entity as input.",
+                pdf_path
+            );
             return Err(2);
         }
         check_future_target_alias(pdf_path, input_path, "PDF output", "input file")?;
@@ -74,7 +79,10 @@ pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTar
         }
         if !is_stdin {
             if fs::metadata(report_path).is_ok() && is_same_file(report_path, input_path) {
-                eprintln!("Error: JSON report {:?} points to the same file entity as input.", report_path);
+                eprintln!(
+                    "Error: JSON report {:?} points to the same file entity as input.",
+                    report_path
+                );
                 return Err(2);
             }
             check_future_target_alias(report_path, input_path, "JSON report", "input file")?;
@@ -82,7 +90,9 @@ pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTar
 
         if !is_stdout {
             if is_same_file(pdf_path, report_path) {
-                eprintln!("Error: Output PDF and JSON report point to the same existing file entity.");
+                eprintln!(
+                    "Error: Output PDF and JSON report point to the same existing file entity."
+                );
                 return Err(2);
             }
             check_future_target_alias(pdf_path, report_path, "PDF output", "JSON report")?;
@@ -91,12 +101,18 @@ pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTar
 
     // 4. Output PDF structure & existence checks
     if !is_stdout {
-        validate_single_output_target(pdf_path, targets.overwrite, "PDF output")?;
+        validate_output_target(pdf_path, targets.overwrite, "PDF output").map_err(|m| {
+            eprintln!("Error: {}", m);
+            4
+        })?;
     }
 
     // 5. Report JSON structure & existence checks (if provided)
     if let Some(ref report_path) = targets.report_json_path {
-        validate_single_output_target(report_path, targets.overwrite, "JSON report")?;
+        validate_output_target(report_path, targets.overwrite, "JSON report").map_err(|m| {
+            eprintln!("Error: {}", m);
+            4
+        })?;
     }
 
     Ok(ValidatedTargets {
@@ -107,44 +123,63 @@ pub fn validate_and_isolate_targets(targets: TargetPaths) -> Result<ValidatedTar
     })
 }
 
-fn validate_single_output_target(path: &Path, overwrite: bool, kind: &str) -> Result<(), i32> {
+/// Structural validation of a single output destination:
+/// - parent directory must exist and be a directory;
+/// - the destination itself must not be a symlink or an existing directory;
+/// - an existing regular file requires `overwrite`.
+///
+/// Returns a human-readable reason on failure; the caller decides how to log
+/// it and which exit code (or per-item failure) to map it to.
+pub fn validate_output_target(path: &Path, overwrite: bool, kind: &str) -> Result<(), String> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
 
-    let parent_meta = match fs::metadata(parent) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Error: Parent directory for {} {:?} does not exist or cannot be accessed: {}", kind, path, e);
-            return Err(4);
-        }
-    };
+    let parent_meta = fs::metadata(parent).map_err(|e| {
+        format!(
+            "Parent directory for {} {:?} does not exist or cannot be accessed: {}",
+            kind, path, e
+        )
+    })?;
 
     if !parent_meta.is_dir() {
-        eprintln!("Error: Parent path {:?} for {} is not a directory.", parent, kind);
-        return Err(4);
+        return Err(format!(
+            "Parent path {:?} for {} is not a directory.",
+            parent, kind
+        ));
     }
 
     if let Ok(m) = fs::symlink_metadata(path) {
         if m.is_symlink() {
-            eprintln!("Error: Refusing to output to symlink {:?} for {}.", path, kind);
-            return Err(4);
+            return Err(format!(
+                "Refusing to output to symlink {:?} for {}.",
+                path, kind
+            ));
         }
         if m.is_dir() {
-            eprintln!("Error: Destination {:?} is an existing directory, not a file.", path);
-            return Err(4);
+            return Err(format!(
+                "Destination {:?} is an existing directory, not a file.",
+                path
+            ));
         }
         if !overwrite {
-            eprintln!("Error: Destination file {:?} already exists and --overwrite was not specified.", path);
-            return Err(4);
+            return Err(format!(
+                "Destination file {:?} already exists and --overwrite was not specified.",
+                path
+            ));
         }
     }
 
     Ok(())
 }
 
-fn check_future_target_alias(path_a: &Path, path_b: &Path, name_a: &str, name_b: &str) -> Result<(), i32> {
+fn check_future_target_alias(
+    path_a: &Path,
+    path_b: &Path,
+    name_a: &str,
+    name_b: &str,
+) -> Result<(), i32> {
     let parent_a = match path_a.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -165,7 +200,10 @@ fn check_future_target_alias(path_a: &Path, path_b: &Path, name_a: &str, name_b:
         }
     };
     if !meta_a.is_dir() {
-        eprintln!("Error: Parent path {:?} for {} is not a directory.", parent_a, name_a);
+        eprintln!(
+            "Error: Parent path {:?} for {} is not a directory.",
+            parent_a, name_a
+        );
         return Err(4);
     }
 
@@ -180,7 +218,10 @@ fn check_future_target_alias(path_a: &Path, path_b: &Path, name_a: &str, name_b:
         }
     };
     if !meta_b.is_dir() {
-        eprintln!("Error: Parent path {:?} for {} is not a directory.", parent_b, name_b);
+        eprintln!(
+            "Error: Parent path {:?} for {} is not a directory.",
+            parent_b, name_b
+        );
         return Err(4);
     }
 
@@ -188,7 +229,9 @@ fn check_future_target_alias(path_a: &Path, path_b: &Path, name_a: &str, name_b:
     let fname_b = path_b.file_name().unwrap_or_default();
 
     let same_name = if cfg!(windows) {
-        fname_a.to_string_lossy().eq_ignore_ascii_case(&fname_b.to_string_lossy())
+        fname_a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&fname_b.to_string_lossy())
     } else {
         fname_a == fname_b
     };

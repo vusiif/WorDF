@@ -17,13 +17,21 @@ fn main() {
             .unwrap_or_else(|e| panic!("Failed to read font asset at '{}': {}", font_rel_path, e));
 
         // Use ultra-compression level 22 to maximize embedded size reduction
-        let compressed = zstd::encode_all(&ttf_bytes[..], 22)
-            .expect("Failed to compress font bytes with zstd");
+        let compressed =
+            zstd::encode_all(&ttf_bytes[..], 22).expect("Failed to compress font bytes with zstd");
 
-        fs::write(&target_compressed, compressed)
-            .unwrap_or_else(|e| panic!("Failed to write compressed font to '{:?}': {}", target_compressed, e));
+        fs::write(&target_compressed, compressed).unwrap_or_else(|e| {
+            panic!(
+                "Failed to write compressed font to '{:?}': {}",
+                target_compressed, e
+            )
+        });
     } else {
-        fs::write(&target_compressed, [])
-            .unwrap_or_else(|e| panic!("Failed to write stub file to '{:?}': {}", target_compressed, e));
+        fs::write(&target_compressed, []).unwrap_or_else(|e| {
+            panic!(
+                "Failed to write stub file to '{:?}': {}",
+                target_compressed, e
+            )
+        });
     }
 }

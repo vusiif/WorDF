@@ -9,9 +9,7 @@ use wordf::font::is_cjk_char;
 #[cfg(feature = "embedded-cjk-font")]
 use wordf::font::FontCmap;
 #[cfg(feature = "embedded-cjk-font")]
-use wordf::{
-    adapt_docx_cjk_in_memory_with_bytes, EMBEDDED_CJK_FONT_BYTES, EMBEDDED_CJK_FONT_NAME,
-};
+use wordf::{adapt_docx_cjk_in_memory_with_bytes, EMBEDDED_CJK_FONT_BYTES, EMBEDDED_CJK_FONT_NAME};
 
 pub fn make_minimal_docx(text: &str) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -83,7 +81,10 @@ fn test_chinese_body_2_document_xml_counts() {
         }
     });
     assert_eq!(hanzi_count, 26267, "Hanzi count must be exactly 26,267");
-    assert_eq!(east_asia_count, 29434, "East Asian count must be exactly 29,434");
+    assert_eq!(
+        east_asia_count, 29434,
+        "East Asian count must be exactly 29,434"
+    );
 }
 
 #[test]
@@ -100,8 +101,14 @@ fn test_defect_1_font_cmap_parsing_and_lookup() {
         .unwrap_or_else(|| EMBEDDED_CJK_FONT_BYTES.to_vec());
     let cmap = FontCmap::from_bytes(&font_bytes).expect("Failed to parse font cmap");
 
-    assert!(cmap.has_glyph('牢', &font_bytes), "牢 (U+7262) must have glyph");
-    assert!(cmap.has_glyph('一', &font_bytes), "一 (U+4E00) must have glyph");
+    assert!(
+        cmap.has_glyph('牢', &font_bytes),
+        "牢 (U+7262) must have glyph"
+    );
+    assert!(
+        cmap.has_glyph('一', &font_bytes),
+        "一 (U+4E00) must have glyph"
+    );
 }
 
 #[test]
@@ -124,15 +131,15 @@ fn test_defect_1_missing_glyph_fails_fast_with_diagnostic() {
     };
 
     let docx_missing = make_minimal_docx(&format!("桥梁栏杆或护栏{}固", unmapped_char));
-    let res_err = adapt_docx_cjk_in_memory_with_bytes(
-        &docx_missing,
-        Some(font_name),
-        Some(&font_bytes),
-        &[],
-    );
+    let res_err =
+        adapt_docx_cjk_in_memory_with_bytes(&docx_missing, Some(font_name), Some(&font_bytes), &[]);
     assert!(res_err.is_err(), "Must fail fast when font lacks glyph");
     let err_msg = res_err.unwrap_err();
-    assert!(err_msg.contains("Font diagnostic failure"), "Message: {}", err_msg);
+    assert!(
+        err_msg.contains("Font diagnostic failure"),
+        "Message: {}",
+        err_msg
+    );
     assert!(
         err_msg.contains("lacks glyphs for 1 East Asian characters"),
         "Message: {}",
@@ -140,12 +147,8 @@ fn test_defect_1_missing_glyph_fails_fast_with_diagnostic() {
     );
 
     let docx_covered = make_minimal_docx("桥梁栏杆或护栏牢固");
-    let res_ok = adapt_docx_cjk_in_memory_with_bytes(
-        &docx_covered,
-        Some(font_name),
-        Some(&font_bytes),
-        &[],
-    );
+    let res_ok =
+        adapt_docx_cjk_in_memory_with_bytes(&docx_covered, Some(font_name), Some(&font_bytes), &[]);
     assert!(res_ok.is_ok(), "Must succeed when all glyphs covered");
 }
 
@@ -156,7 +159,9 @@ fn test_defect_self_closing_run_not_greedy() {
     assert_eq!(count, 2, "Expected 2 CJK characters, got {}", count);
     assert!(adapted.starts_with("<w:p><w:r/>"), "Adapted: {}", adapted);
     assert!(
-        adapted.contains(r#"<w:r><w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>正文</w:t></w:r>"#),
+        adapted.contains(
+            r#"<w:r><w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>正文</w:t></w:r>"#
+        ),
         "Adapted: {}",
         adapted
     );
@@ -166,7 +171,9 @@ fn test_defect_self_closing_run_not_greedy() {
     assert_eq!(count_attr, 2);
     assert!(adapted_attr.contains(r#"<w:r rsidR="001234"/>"#));
     assert!(adapted_attr.contains(r#"<w:r />"#));
-    assert!(adapted_attr.contains(r#"<w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>测试</w:t>"#));
+    assert!(
+        adapted_attr.contains(r#"<w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>测试</w:t>"#)
+    );
 
     let xml_newline = "<w:p><w:r\n><w:t>换行</w:t></w:r></w:p>";
     let (adapted_nl, count_nl) = adapt_xml_text(xml_newline, "SimSun", &[]);
@@ -206,7 +213,9 @@ fn test_defect_expand_self_closing_rpr_single_rpr() {
     let (adapted, count) = adapt_xml_text(xml, "SimSun", &[]);
     assert_eq!(count, 4);
     assert!(
-        adapted.contains(r#"<w:r><w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>中文正文</w:t></w:r>"#),
+        adapted.contains(
+            r#"<w:r><w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>中文正文</w:t></w:r>"#
+        ),
         "Expected single in-place expanded rPr, got: {}",
         adapted
     );

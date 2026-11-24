@@ -1,8 +1,8 @@
 //! Multi-tiered font fallback chain for sequential glyph coverage resolution.
 //! License: GPL-3.0-or-later
 
-use std::sync::Arc;
 use crate::font::cmap::FontCmap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct FallbackFontItem {
@@ -114,7 +114,8 @@ mod tests {
         buf.extend_from_slice(&1u32.to_be_bytes()); // glyph id 1
 
         let total_table_len = buf.len() - (table_offset as usize);
-        buf[cmap_tag_offset + 12..cmap_tag_offset + 16].copy_from_slice(&(total_table_len as u32).to_be_bytes());
+        buf[cmap_tag_offset + 12..cmap_tag_offset + 16]
+            .copy_from_slice(&(total_table_len as u32).to_be_bytes());
         let _ = f12_start;
 
         buf

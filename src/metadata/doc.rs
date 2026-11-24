@@ -68,7 +68,8 @@ pub fn extract_doc_metadata(bytes: &[u8]) -> DocumentMetadata {
     for entry in comp.walk() {
         if entry.is_stream() {
             let name = entry.name();
-            if name.ends_with("SummaryInformation") && !name.contains("DocumentSummaryInformation") {
+            if name.ends_with("SummaryInformation") && !name.contains("DocumentSummaryInformation")
+            {
                 stream_path = Some(entry.path().to_path_buf());
                 break;
             }
@@ -82,7 +83,9 @@ pub fn extract_doc_metadata(bytes: &[u8]) -> DocumentMetadata {
 
     let mut stream_data = Vec::new();
     if let Ok(stream) = comp.open_stream(path) {
-        let _ = stream.take(2 * 1024 * 1024 + 1).read_to_end(&mut stream_data);
+        let _ = stream
+            .take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut stream_data);
     }
 
     if stream_data.len() < 48 {
@@ -108,8 +111,16 @@ pub fn extract_doc_metadata(bytes: &[u8]) -> DocumentMetadata {
         if entry_offset + 8 > sec_data.len() {
             break;
         }
-        let prop_id = u32::from_le_bytes(sec_data[entry_offset..entry_offset + 4].try_into().unwrap_or([0; 4]));
-        let prop_rel_offset = u32::from_le_bytes(sec_data[entry_offset + 4..entry_offset + 8].try_into().unwrap_or([0; 4])) as usize;
+        let prop_id = u32::from_le_bytes(
+            sec_data[entry_offset..entry_offset + 4]
+                .try_into()
+                .unwrap_or([0; 4]),
+        );
+        let prop_rel_offset = u32::from_le_bytes(
+            sec_data[entry_offset + 4..entry_offset + 8]
+                .try_into()
+                .unwrap_or([0; 4]),
+        ) as usize;
 
         let val_opt = parse_property_string(sec_data, prop_rel_offset);
         match prop_id {

@@ -8,15 +8,16 @@ use std::process;
 use std::time::Instant;
 
 use wordf::format::MAX_INPUT_BYTES;
-use wordf::report::{format_schema_v1_json, ReportData};
 use wordf::transaction::{
-    atomic_commit_rename, commit_two_phase, create_exclusive_temp_file, TaskExecutor,
-    ValidatedTargets,
+    commit_two_phase, create_exclusive_temp_file, TaskExecutor, ValidatedTargets,
 };
-use wordf::{convert, ConversionOptions, Diagnostic};
+use wordf::{convert, ConversionOptions};
 
-use crate::cli::args::{map_conversion_error_to_exit_code, TOOL_NAME, TOOL_VERSION};
+use crate::cli::args::map_conversion_error_to_exit_code;
 use crate::cli::discovery::DiscoveredFonts;
+
+mod report;
+use self::report::{build_report_json, write_report_file, ReportMeta};
 
 pub struct SingleConfig<'a> {
     pub validated: &'a ValidatedTargets,
@@ -27,16 +28,6 @@ pub struct SingleConfig<'a> {
     pub quiet: bool,
     pub verbose: bool,
     pub t_start: Instant,
-}
-
-struct ReportMeta<'a> {
-    pub input_bytes: &'a [u8],
-    pub warnings: &'a [Diagnostic],
-    pub pdf_bytes_len: usize,
-    pub page_count: u32,
-    pub conversion_status: &'static str,
-    pub delivery_status: &'static str,
-    pub conv_ms: f64,
 }
 
 pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
@@ -82,13 +73,20 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
     );
 
     if !config.quiet && !output.warnings.is_empty() {
-        eprintln!("Diagnostics & warnings encountered ({}):", output.warnings.len());
+        eprintln!(
+            "Diagnostics & warnings encountered ({}):",
+            output.warnings.len()
+        );
         for w in &output.warnings {
             eprintln!("  [{}] {}", w.code, w.message);
         }
     }
 
-    let status = if output.warnings.is_empty() { "success" } else { "success_with_warnings" };
+    let status = if output.warnings.is_empty() {
+        "success"
+    } else {
+        "success_with_warnings"
+    };
 
     // Strict quality gate: abort delivery if any warning occurs
     if config.strict && !output.warnings.is_empty() {
@@ -106,7 +104,9 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
                 delivery_status: "aborted",
                 conv_ms,
             };
-            write_report_file(rep_path, config, &meta);
+            if let Err(e) = write_report_file(rep_path, config, &meta) {
+                eprintln!("Error writing JSON report {:?}: {}", rep_path, e);
+            }
         }
         process::exit(3);
     }
@@ -189,15 +189,32 @@ fn read_input_bytes(path: &Path) -> Vec<u8> {
             process::exit(4);
         }
         if buf.len() > MAX_INPUT_BYTES {
-            eprintln!("Error: Stdin exceeds limit of {} bytes", MAX_INPUT_BYTES);
-            process::exit(1);
+            eprintln!(
+                "Error: Stdin input size exceeds maximum limit of {} bytes (128 MiB)",
+                MAX_INPUT_BYTES
+            );
+            process::exit(6);
         }
         buf
     } else {
-        fs::read(path).unwrap_or_else(|e| {
+        let file = fs::File::open(path).unwrap_or_else(|e| {
             eprintln!("Error reading input file {:?}: {}", path, e);
             process::exit(4);
-        })
+        });
+        let mut buf = Vec::new();
+        let mut handle = file.take(MAX_INPUT_BYTES as u64 + 1);
+        if let Err(e) = handle.read_to_end(&mut buf) {
+            eprintln!("Error reading input file {:?}: {}", path, e);
+            process::exit(4);
+        }
+        if buf.len() > MAX_INPUT_BYTES {
+            eprintln!(
+                "Error: Input file {:?} size exceeds maximum limit of {} bytes (128 MiB)",
+                path, MAX_INPUT_BYTES
+            );
+            process::exit(6);
+        }
+        buf
     }
 }
 
@@ -207,7 +224,13 @@ fn deliver_stdout(config: &SingleConfig<'_>, pdf_bytes: &[u8], meta: &ReportMeta
         process::exit(4);
     }
     if let Some(ref rep_path) = config.validated.report_json_path {
-        write_report_file(rep_path, config, meta);
+        if let Err(e) = write_report_file(rep_path, config, meta) {
+            eprintln!(
+                "output.report_commit_failed: Failed to write JSON report {:?}: {}. PDF was already delivered to stdout.",
+                rep_path, e
+            );
+            process::exit(9);
+        }
     }
     if config.verbose {
         eprintln!(
@@ -218,52 +241,4 @@ fn deliver_stdout(config: &SingleConfig<'_>, pdf_bytes: &[u8], meta: &ReportMeta
     }
 
     process::exit(0);
-}
-
-fn build_report_json(config: &SingleConfig<'_>, meta: &ReportMeta<'_>) -> String {
-    let is_doc = meta.input_bytes.starts_with(&wordf::format::DOC_MAGIC);
-    let is_docx = meta.input_bytes.starts_with(&wordf::format::ZIP_MAGIC);
-    let (fmt, b_name, b_ver) = if is_doc {
-        ("doc", "rwml+docxide-pdf", "0.1.4+0.19.0")
-    } else if is_docx {
-        ("docx", "docxide-pdf", "0.19.0")
-    } else {
-        ("unknown", "unknown", "unknown")
-    };
-    let fb_used = meta.warnings.iter().any(|w| w.code == "font.fallback")
-        || config.discovered_fonts.primary_cjk_fallback.is_some();
-
-    let rep = ReportData {
-        tool_name: TOOL_NAME,
-        tool_version: TOOL_VERSION,
-        input_format: fmt,
-        input_bytes: meta.input_bytes.len(),
-        backend_name: b_name,
-        backend_version: b_ver,
-        conversion_status: meta.conversion_status,
-        delivery_status: meta.delivery_status,
-        pdf_bytes: meta.pdf_bytes_len,
-        pdf_page_count: meta.page_count,
-        warnings: meta.warnings,
-        conversion_ms: meta.conv_ms,
-        pre_report_ms: config.t_start.elapsed().as_secs_f64() * 1000.0,
-        font_policy: config.font_policy,
-        fallback_used: fb_used,
-    };
-    format_schema_v1_json(&rep)
-}
-
-fn write_report_file(rep_path: &Path, config: &SingleConfig<'_>, meta: &ReportMeta<'_>) {
-    let json = build_report_json(config, meta);
-    if let Ok(mut g) = create_exclusive_temp_file(rep_path, "rep") {
-        if g.file.write_all(json.as_bytes()).is_ok() && g.file.flush().is_ok() {
-            if atomic_commit_rename(&g.path, rep_path, config.validated.overwrite).is_ok() {
-                g.committed = true;
-            } else {
-                g.cleanup();
-            }
-        } else {
-            g.cleanup();
-        }
-    }
 }
