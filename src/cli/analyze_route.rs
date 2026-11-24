@@ -92,9 +92,8 @@ pub fn run_analyze_route(args: &CliArgs, input_path: &Path, options: &Conversion
                 process::exit(4);
             }
         };
-        let mut buf = Vec::with_capacity(
-            in_meta.len().min(wordf::format::MAX_INPUT_BYTES as u64) as usize,
-        );
+        let mut buf =
+            Vec::with_capacity(in_meta.len().min(wordf::format::MAX_INPUT_BYTES as u64) as usize);
         let mut take_handle = (&mut file).take(wordf::format::MAX_INPUT_BYTES as u64 + 1);
         if let Err(e) = take_handle.read_to_end(&mut buf) {
             eprintln!("Error reading input file {:?}: {}", input_path, e);

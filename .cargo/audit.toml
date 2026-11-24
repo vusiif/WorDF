@@ -1,0 +1,21 @@
+# Cargo audit policy for WorDF
+#
+# The advisories below apply strictly to `zip` filesystem extraction methods
+# (`ZipArchive::extract` and `ZipStreamReader::extract`), symlink creation, or
+# unused compression/encryption schemes (AES, shrink, reduce, implode).
+#
+# WorDF operates strictly in-memory using `ZipArchive::by_name` and `ZipWriter::start_file`,
+# with `default-features = false, features = ["deflate"]`. None of the vulnerable code
+# paths are reachable.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0546",
+    "RUSTSEC-2026-0547",
+    "RUSTSEC-2026-0548",
+]
