@@ -24,6 +24,8 @@ jobs:
         run: cargo fmt --check
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
+      - name: Build binary
+        run: cargo build --bin wordf
       - name: Run tests
         run: cargo test --all-targets
 

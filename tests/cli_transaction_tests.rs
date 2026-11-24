@@ -10,12 +10,7 @@ use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
 fn get_bin_path() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // drop test binary name
-    if p.ends_with("deps") {
-        p.pop(); // drop 'deps'
-    }
-    p.join("wordf")
+    PathBuf::from(env!("CARGO_BIN_EXE_wordf"))
 }
 
 fn make_test_docx(text: &str) -> Vec<u8> {
