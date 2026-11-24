@@ -1881,3 +1881,85 @@ fn test_case_40_batch_symlink_output_rejected_and_preserved() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_case_41_analyze_mode_report_alias_rejection() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case41_analyze_alias");
+    let input = dir.join("diag.docx");
+    let content = make_test_docx("Analyze report alias protection test");
+    fs::write(&input, &content).unwrap();
+
+    let output = Command::new(&bin)
+        .arg(&input)
+        .arg("--analyze")
+        .arg("--report-json")
+        .arg(&input)
+        .arg("--overwrite")
+        .output()
+        .expect("Failed to execute wordf in --analyze mode");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "Analyze mode report pointing to input must fail with exit code 2, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(&input).unwrap(),
+        content,
+        "Source file must be untouched when report target conflicts with input"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_42_batch_report_target_collision_rejection() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case42_batch_collision");
+    let input_dir = dir.join("inputs");
+    let output_dir = dir.join("outputs");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let doc = input_dir.join("sample.docx");
+    let content = make_test_docx("Batch collision protection");
+    fs::write(&doc, &content).unwrap();
+
+    // 1. Report points to input document
+    let out1 = Command::new(&bin)
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&output_dir)
+        .arg("--report-json")
+        .arg(&doc)
+        .arg("--overwrite")
+        .output()
+        .expect("Failed to execute batch");
+    assert_eq!(out1.status.code(), Some(2));
+    assert_eq!(
+        fs::read(&doc).unwrap(),
+        content,
+        "Input document must remain untouched"
+    );
+
+    // 2. Report points to output PDF target
+    let target_pdf = output_dir.join("sample.pdf");
+    let out2 = Command::new(&bin)
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&output_dir)
+        .arg("--report-json")
+        .arg(&target_pdf)
+        .arg("--overwrite")
+        .output()
+        .expect("Failed to execute batch");
+    assert_eq!(out2.status.code(), Some(2));
+    assert!(
+        !target_pdf.exists(),
+        "Target PDF must not have been created or corrupted"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

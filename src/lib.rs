@@ -163,6 +163,21 @@ pub fn convert(
     input: &[u8],
     options: &ConversionOptions,
 ) -> Result<ConversionOutput, ConversionError> {
+    if input.len() > format::MAX_INPUT_BYTES {
+        return Err(ConversionError {
+            kind: ConversionErrorKind::ResourceLimit,
+            message: format!(
+                "Input size ({} bytes) exceeds maximum allowed limit of {} bytes (128 MiB)",
+                input.len(),
+                format::MAX_INPUT_BYTES
+            ),
+        });
+    }
+
+    if let Some(ref pages) = options.pages {
+        pages::validate_page_indices(pages)?;
+    }
+
     let decrypted_holder = crypto::decrypt_office_document(input, options.password.as_deref())?;
     let effective_input: &[u8] = match decrypted_holder.as_deref() {
         Some(d) => d,

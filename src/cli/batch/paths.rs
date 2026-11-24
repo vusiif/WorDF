@@ -1,10 +1,24 @@
 //! Path resolution, recursive document discovery, and destination mapping.
 //! License: GPL-3.0-or-later
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use wordf::transaction::{check_future_target_alias, is_same_file};
+
 pub const MAX_BATCH_WORKERS: usize = 64;
+
+#[derive(Debug, Clone)]
+pub struct BatchItemPlan {
+    pub input_path: PathBuf,
+    pub output_pdf_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchPlan {
+    pub items: Vec<BatchItemPlan>,
+}
 
 /// Computes destination PDF path for an input document, preserving relative subdirectory structure when present.
 pub fn compute_output_pdf_path(
@@ -73,4 +87,85 @@ pub fn discover_word_documents_ext(
 
     files.sort();
     Ok(files)
+}
+
+/// Builds and validates the complete batch plan, checking for alias collisions between
+/// input documents, output PDF targets, and the optional JSON report target before execution.
+pub fn create_and_validate_batch_plan(
+    input_dir: &Path,
+    output_dir: &Path,
+    report_json: Option<&Path>,
+    files: &[PathBuf],
+) -> Result<BatchPlan, i32> {
+    if let Some(rep_path) = report_json {
+        if is_same_file(input_dir, rep_path) {
+            eprintln!(
+                "Error: JSON report {:?} points to the input directory {:?}.",
+                rep_path, input_dir
+            );
+            return Err(2);
+        }
+        if is_same_file(output_dir, rep_path) {
+            eprintln!(
+                "Error: JSON report {:?} points to the output directory {:?}.",
+                rep_path, output_dir
+            );
+            return Err(2);
+        }
+    }
+
+    let mut target_map: HashMap<String, PathBuf> = HashMap::new();
+    let mut items = Vec::with_capacity(files.len());
+
+    for in_path in files {
+        let target = match compute_output_pdf_path(in_path, input_dir, output_dir) {
+            Some(t) => t,
+            None => {
+                eprintln!("Error: Failed to compute output PDF path for {:?}", in_path);
+                return Err(2);
+            }
+        };
+
+        let normalized = target.to_string_lossy();
+        let target_key = if cfg!(windows) {
+            normalized.to_ascii_lowercase()
+        } else {
+            normalized.into_owned()
+        };
+
+        if let Some(prev) = target_map.insert(target_key, in_path.clone()) {
+            eprintln!(
+                "Error: Output filename collision detected between {:?} and {:?} (both map to {:?})",
+                prev, in_path, target
+            );
+            return Err(2);
+        }
+
+        if let Some(rep_path) = report_json {
+            if fs::metadata(rep_path).is_ok() && is_same_file(in_path, rep_path) {
+                eprintln!(
+                    "Error: JSON report {:?} points to the same file entity as input document {:?}.",
+                    rep_path, in_path
+                );
+                return Err(2);
+            }
+            check_future_target_alias(rep_path, in_path, "JSON report", "input file")?;
+
+            if fs::metadata(rep_path).is_ok() && is_same_file(&target, rep_path) {
+                eprintln!(
+                    "Error: Target alias collision between PDF output {:?} and JSON report {:?}.",
+                    target, rep_path
+                );
+                return Err(2);
+            }
+            check_future_target_alias(&target, rep_path, "PDF output", "JSON report")?;
+        }
+
+        items.push(BatchItemPlan {
+            input_path: in_path.clone(),
+            output_pdf_path: target,
+        });
+    }
+
+    Ok(BatchPlan { items })
 }

@@ -9,7 +9,10 @@ use std::process;
 use super::args::{map_conversion_error_to_exit_code, CliArgs};
 use wordf::analyze_document;
 use wordf::report::format_analysis_json;
-use wordf::transaction::{atomic_commit_rename, create_exclusive_temp_file};
+use wordf::transaction::{
+    atomic_commit_rename, check_future_target_alias, create_exclusive_temp_file, is_same_file,
+    validate_output_target,
+};
 use wordf::{ConversionOptions, Diagnostic};
 
 pub fn run_analyze_route(args: &CliArgs, input_path: &Path, options: &ConversionOptions) -> ! {
@@ -21,6 +24,31 @@ pub fn run_analyze_route(args: &CliArgs, input_path: &Path, options: &Conversion
     if !is_stdin && input_path.is_dir() {
         eprintln!("Error: --analyze mode does not support directory inputs. Please specify a single document.");
         process::exit(2);
+    }
+
+    if let Some(ref rep_path) = args.report_json {
+        if rep_path.as_os_str() == "-" {
+            eprintln!("Error: stdout report '-' is not supported by WorDF contract.");
+            process::exit(2);
+        }
+        if !is_stdin {
+            if fs::metadata(rep_path).is_ok() && is_same_file(rep_path, input_path) {
+                eprintln!(
+                    "Error: JSON report {:?} points to the same file entity as input.",
+                    rep_path
+                );
+                process::exit(2);
+            }
+            if let Err(code) =
+                check_future_target_alias(rep_path, input_path, "JSON report", "input file")
+            {
+                process::exit(code);
+            }
+        }
+        if let Err(msg) = validate_output_target(rep_path, args.overwrite, "JSON report") {
+            eprintln!("Error: {}", msg);
+            process::exit(4);
+        }
     }
 
     let input_bytes = if is_stdin {
@@ -40,6 +68,7 @@ pub fn run_analyze_route(args: &CliArgs, input_path: &Path, options: &Conversion
         }
         buf
     } else {
+        use std::io::Read;
         let in_meta = match input_path.metadata() {
             Ok(m) => m,
             Err(e) => {
@@ -49,20 +78,37 @@ pub fn run_analyze_route(args: &CliArgs, input_path: &Path, options: &Conversion
         };
         if in_meta.len() > wordf::format::MAX_INPUT_BYTES as u64 {
             eprintln!(
-                    "Error: Input file {:?} size ({} bytes) exceeds maximum limit of {} bytes (128 MiB)",
-                    input_path,
-                    in_meta.len(),
-                    wordf::format::MAX_INPUT_BYTES
-                );
+                "Error: Input file {:?} size ({} bytes) exceeds maximum limit of {} bytes (128 MiB)",
+                input_path,
+                in_meta.len(),
+                wordf::format::MAX_INPUT_BYTES
+            );
             process::exit(6);
         }
-        match fs::read(input_path) {
-            Ok(b) => b,
+        let mut file = match fs::File::open(input_path) {
+            Ok(f) => f,
             Err(e) => {
                 eprintln!("Error reading input file {:?}: {}", input_path, e);
                 process::exit(4);
             }
+        };
+        let mut buf = Vec::with_capacity(
+            in_meta.len().min(wordf::format::MAX_INPUT_BYTES as u64) as usize,
+        );
+        let mut take_handle = (&mut file).take(wordf::format::MAX_INPUT_BYTES as u64 + 1);
+        if let Err(e) = take_handle.read_to_end(&mut buf) {
+            eprintln!("Error reading input file {:?}: {}", input_path, e);
+            process::exit(4);
         }
+        if buf.len() > wordf::format::MAX_INPUT_BYTES {
+            eprintln!(
+                "Error: Input file {:?} size exceeds maximum limit of {} bytes (128 MiB)",
+                input_path,
+                wordf::format::MAX_INPUT_BYTES
+            );
+            process::exit(6);
+        }
+        buf
     };
 
     let mut analysis = match analyze_document(&input_bytes, options) {

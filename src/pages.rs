@@ -55,13 +55,13 @@ impl PageRange {
                     ));
                 }
                 for p in start..=end {
-                    if page_set.len() >= MAX_PAGE_COUNT {
+                    page_set.insert(p - 1);
+                    if page_set.len() > MAX_PAGE_COUNT {
                         return Err(format!(
                             "Total selected pages exceed maximum allowed limit ({})",
                             MAX_PAGE_COUNT
                         ));
                     }
-                    page_set.insert(p - 1);
                 }
             } else {
                 let p: usize = part
@@ -76,13 +76,13 @@ impl PageRange {
                         MAX_PAGE_NUMBER
                     ));
                 }
-                if page_set.len() >= MAX_PAGE_COUNT {
+                page_set.insert(p - 1);
+                if page_set.len() > MAX_PAGE_COUNT {
                     return Err(format!(
                         "Total selected pages exceed maximum allowed limit ({})",
                         MAX_PAGE_COUNT
                     ));
                 }
-                page_set.insert(p - 1);
             }
         }
 
@@ -111,6 +111,32 @@ impl PageRange {
         }
         Ok(self.pages.clone())
     }
+}
+
+/// Validate raw page indices passed directly via ConversionOptions.pages.
+pub fn validate_page_indices(indices: &[usize]) -> Result<(), crate::ConversionError> {
+    if indices.len() > MAX_PAGE_COUNT {
+        return Err(crate::ConversionError {
+            kind: crate::ConversionErrorKind::PageOutOfRange,
+            message: format!(
+                "Total selected pages ({}) exceeds maximum allowed limit ({})",
+                indices.len(),
+                MAX_PAGE_COUNT
+            ),
+        });
+    }
+    for &idx in indices {
+        if idx >= MAX_PAGE_NUMBER {
+            return Err(crate::ConversionError {
+                kind: crate::ConversionErrorKind::PageOutOfRange,
+                message: format!(
+                    "Page index {} exceeds maximum allowed page number limit ({})",
+                    idx, MAX_PAGE_NUMBER
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -164,5 +190,16 @@ mod tests {
 
         let err = range.validate_against_total(0).unwrap_err();
         assert!(err.contains("0 pages"));
+    }
+
+    #[test]
+    fn test_deduplication_at_max_limit() {
+        let range = PageRange::parse("1-10000,1,100").unwrap();
+        assert_eq!(range.pages.len(), 10000);
+        assert_eq!(range.pages[0], 0);
+        assert_eq!(range.pages[9999], 9999);
+
+        assert!(validate_page_indices(&[0, 1, 2]).is_ok());
+        assert!(validate_page_indices(&[MAX_PAGE_NUMBER]).is_err());
     }
 }

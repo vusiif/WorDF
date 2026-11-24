@@ -18,6 +18,17 @@ pub fn decrypt_office_document(
     bytes: &[u8],
     password: Option<&str>,
 ) -> Result<Option<Vec<u8>>, ConversionError> {
+    if bytes.len() > crate::format::MAX_INPUT_BYTES {
+        return Err(ConversionError {
+            kind: ConversionErrorKind::ResourceLimit,
+            message: format!(
+                "Input size ({} bytes) exceeds maximum allowed limit of {} bytes (128 MiB)",
+                bytes.len(),
+                crate::format::MAX_INPUT_BYTES
+            ),
+        });
+    }
+
     if bytes.len() >= 8 && bytes[..8] == CFB_MAGIC {
         let cursor = Cursor::new(bytes);
         if let Ok(mut comp) = cfb::CompoundFile::open(cursor) {
@@ -47,14 +58,33 @@ pub fn decrypt_office_document(
                 };
 
                 let mut info_bytes = Vec::new();
-                if let Ok(s) = comp.open_stream("/EncryptionInfo") {
-                    let _ = s.take(1024 * 1024 + 1).read_to_end(&mut info_bytes);
+                match comp.open_stream("/EncryptionInfo") {
+                    Ok(s) => {
+                        let _ = s.take(1024 * 1024 + 1).read_to_end(&mut info_bytes);
+                    }
+                    Err(_) => {
+                        return Err(ConversionError {
+                            kind: ConversionErrorKind::CorruptInput,
+                            message: "Encrypted Office document is missing or has corrupt '/EncryptionInfo' stream"
+                                .to_string(),
+                        });
+                    }
                 }
+
                 let mut pkg_bytes = Vec::new();
-                if let Ok(s) = comp.open_stream("/EncryptedPackage") {
-                    let _ = s
-                        .take(crate::format::MAX_INPUT_BYTES as u64 + 1)
-                        .read_to_end(&mut pkg_bytes);
+                match comp.open_stream("/EncryptedPackage") {
+                    Ok(s) => {
+                        let _ = s
+                            .take(crate::format::MAX_INPUT_BYTES as u64 + 1)
+                            .read_to_end(&mut pkg_bytes);
+                    }
+                    Err(_) => {
+                        return Err(ConversionError {
+                            kind: ConversionErrorKind::CorruptInput,
+                            message: "Encrypted Office document is missing or has corrupt '/EncryptedPackage' stream"
+                                .to_string(),
+                        });
+                    }
                 }
 
                 let decrypted = agile::decrypt_agile_package(&info_bytes, &pkg_bytes, pwd)?;

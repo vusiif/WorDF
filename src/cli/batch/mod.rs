@@ -6,11 +6,13 @@ pub mod paths;
 mod report;
 pub mod worker;
 
-pub use paths::{compute_output_pdf_path, discover_word_documents_ext, MAX_BATCH_WORKERS};
+pub use paths::{create_and_validate_batch_plan, discover_word_documents_ext, MAX_BATCH_WORKERS};
+
+#[cfg(test)]
+pub use paths::compute_output_pdf_path;
 use report::commit_batch_report;
 use worker::{execute_batch_item, BatchTaskResult};
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,29 +110,12 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
         });
     }
 
-    let mut target_map: HashMap<String, PathBuf> = HashMap::new();
-    for in_path in &files {
-        if let Some(target) =
-            compute_output_pdf_path(in_path, &config.input_dir, &config.output_dir)
-        {
-            // Case folding only where the filesystem folds case, mirroring
-            // validate::check_future_target_alias. Case-sensitive filesystems
-            // must not reject outputs that are genuinely distinct files.
-            let normalized = target.to_string_lossy();
-            let target_key = if cfg!(windows) {
-                normalized.to_ascii_lowercase()
-            } else {
-                normalized.into_owned()
-            };
-            if let Some(prev) = target_map.insert(target_key, in_path.clone()) {
-                eprintln!(
-                    "Error: Output filename collision detected between {:?} and {:?} (both map to {:?})",
-                    prev, in_path, target
-                );
-                return Err(2);
-            }
-        }
-    }
+    let plan = create_and_validate_batch_plan(
+        &config.input_dir,
+        &config.output_dir,
+        config.report_json.as_deref(),
+        &files,
+    )?;
 
     let worker_count = config.jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -151,6 +136,7 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
     let failed_count = AtomicUsize::new(0);
     let skipped_count = AtomicUsize::new(0);
     let items: Mutex<Vec<BatchItemReport>> = Mutex::new(Vec::with_capacity(total));
+    let plan_items = &plan.items;
 
     std::thread::scope(|s| {
         for _ in 0..worker_count {
@@ -159,23 +145,9 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
                 if idx >= total {
                     break;
                 }
-                let in_path = &files[idx];
-                let out_pdf =
-                    match compute_output_pdf_path(in_path, &config.input_dir, &config.output_dir) {
-                        Some(p) => p,
-                        None => {
-                            failed_count.fetch_add(1, Ordering::Relaxed);
-                            items.lock().unwrap().push(BatchItemReport {
-                                input_path: in_path.to_string_lossy().to_string(),
-                                output_path: String::new(),
-                                status: "failed".to_string(),
-                                page_count: 0,
-                                elapsed_ms: 0.0,
-                                error: Some("Failed to compute target output path".to_string()),
-                            });
-                            continue;
-                        }
-                    };
+                let item_plan = &plan_items[idx];
+                let in_path = &item_plan.input_path;
+                let out_pdf = item_plan.output_pdf_path.clone();
 
                 match execute_batch_item(in_path, out_pdf, config) {
                     BatchTaskResult::Succeeded {

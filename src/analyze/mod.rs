@@ -36,6 +36,17 @@ pub fn analyze_document(
     bytes: &[u8],
     options: &ConversionOptions,
 ) -> Result<DocumentAnalysis, ConversionError> {
+    if bytes.len() > crate::format::MAX_INPUT_BYTES {
+        return Err(ConversionError {
+            kind: ConversionErrorKind::ResourceLimit,
+            message: format!(
+                "Input size ({} bytes) exceeds maximum allowed limit of {} bytes (128 MiB)",
+                bytes.len(),
+                crate::format::MAX_INPUT_BYTES
+            ),
+        });
+    }
+
     let decrypted_holder =
         crate::crypto::decrypt_office_document(bytes, options.password.as_deref())?;
     let effective_bytes = decrypted_holder.as_deref().unwrap_or(bytes);
@@ -143,10 +154,10 @@ fn analyze_docx_package(
                         message: format!("XML text part '{}' exceeds limit in analyze mode", name),
                     });
                 }
-                // Count basic elements
-                paragraph_count += count_substrings(&xml_content, "<w:p");
-                table_count += count_substrings(&xml_content, "<w:tbl");
-                run_count += count_substrings(&xml_content, "<w:r");
+                // Count basic elements using exact XML tag boundaries
+                paragraph_count += count_xml_element_starts(&xml_content, "w:p");
+                table_count += count_xml_element_starts(&xml_content, "w:tbl");
+                run_count += count_xml_element_starts(&xml_content, "w:r");
 
                 for_each_xml_text_node(&xml_content, |text| {
                     cjk_char_count += count_cjk_chars(text);
@@ -240,8 +251,25 @@ fn analyze_doc_package(
     })
 }
 
-fn count_substrings(haystack: &str, needle: &str) -> usize {
-    haystack.match_indices(needle).count()
+fn count_xml_element_starts(haystack: &str, tag_name: &str) -> usize {
+    let mut count = 0;
+    let mut cursor = 0;
+    let needle = format!("<{}", tag_name);
+    let n_bytes = needle.as_bytes();
+    let h_bytes = haystack.as_bytes();
+
+    while let Some(pos) = haystack[cursor..].find(&needle) {
+        let abs_pos = cursor + pos;
+        let next_idx = abs_pos + n_bytes.len();
+        if next_idx < h_bytes.len() {
+            let nb = h_bytes[next_idx];
+            if matches!(nb, b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/') {
+                count += 1;
+            }
+        }
+        cursor = abs_pos + n_bytes.len();
+    }
+    count
 }
 
 #[cfg(test)]
@@ -249,8 +277,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_count_substrings() {
-        assert_eq!(count_substrings("<w:p><w:p></w:p>", "<w:p"), 2);
-        assert_eq!(count_substrings("no match", "<w:p"), 0);
+    fn test_count_xml_element_starts() {
+        let xml = "<w:p><w:pPr><w:pStyle/></w:pPr><w:r><w:rPr/><w:t>A</w:t></w:r><w:r/></w:p>";
+        assert_eq!(count_xml_element_starts(xml, "w:p"), 1);
+        assert_eq!(count_xml_element_starts(xml, "w:r"), 2);
+        assert_eq!(count_xml_element_starts(xml, "w:tbl"), 0);
+
+        let tbl_xml = "<w:tbl><w:tblPr><w:tblGrid/></w:tblPr></w:tbl>";
+        assert_eq!(count_xml_element_starts(tbl_xml, "w:tbl"), 1);
     }
 }

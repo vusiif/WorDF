@@ -174,7 +174,7 @@ pub fn validate_output_target(path: &Path, overwrite: bool, kind: &str) -> Resul
     Ok(())
 }
 
-fn check_future_target_alias(
+pub fn check_future_target_alias(
     path_a: &Path,
     path_b: &Path,
     name_a: &str,

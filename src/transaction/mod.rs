@@ -12,7 +12,8 @@ pub use temp_file::{
     create_exclusive_temp_file, generate_unpredictable_temp_name, os_random_bytes, TempFileGuard,
 };
 pub use validate::{
-    validate_and_isolate_targets, validate_output_target, TargetPaths, ValidatedTargets,
+    check_future_target_alias, validate_and_isolate_targets, validate_output_target, TargetPaths,
+    ValidatedTargets,
 };
 
 #[cfg(test)]
