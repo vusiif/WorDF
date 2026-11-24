@@ -1968,3 +1968,105 @@ fn test_case_42_batch_report_target_collision_rejection() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_case_43_secure_password_carrier_options() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case43_secure_pwd");
+    let in_file = dir.join("encrypted.docx");
+    let docx = make_test_docx("Secure Password Carrier Test");
+    let password = "VaultSecretPass456!";
+    let encrypted_cfb = wordf::crypto::agile::build_agile_encrypted_cfb_for_test(&docx, password);
+    fs::write(&in_file, &encrypted_cfb).unwrap();
+
+    // 1. Multiple password flags -> exit code 2
+    let out_conflict = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(dir.join("conflict.pdf"))
+        .arg("--password")
+        .arg("pass1")
+        .arg("--password-env")
+        .arg("VAR1")
+        .output()
+        .expect("Failed to execute wordf");
+    assert_eq!(out_conflict.status.code(), Some(2));
+    let err_str = String::from_utf8_lossy(&out_conflict.stderr);
+    assert!(err_str.contains("Multiple password options specified"));
+
+    // 2. Missing password file -> exit code 2
+    let out_missing_file = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(dir.join("missing_file.pdf"))
+        .arg("--password-file")
+        .arg(dir.join("non_existent_key.txt"))
+        .output()
+        .expect("Failed to execute wordf");
+    assert_eq!(out_missing_file.status.code(), Some(2));
+
+    // 3. Missing password env var -> exit code 2
+    let out_missing_env = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(dir.join("missing_env.pdf"))
+        .arg("--password-env")
+        .arg("NON_EXISTENT_WORDF_VAR_99999")
+        .output()
+        .expect("Failed to execute wordf");
+    assert_eq!(out_missing_env.status.code(), Some(2));
+
+    // 4. Successful conversion via --password-file
+    let pwd_file = dir.join("password.txt");
+    fs::write(&pwd_file, format!("{}\r\n", password)).unwrap();
+    let out_file_pdf = dir.join("out_pwd_file.pdf");
+    let out4 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file_pdf)
+        .arg("--password-file")
+        .arg(&pwd_file)
+        .output()
+        .expect("Failed to execute wordf");
+    assert_eq!(out4.status.code(), Some(0));
+    assert!(out_file_pdf.exists());
+
+    // 5. Successful conversion via --password-env
+    let out_env_pdf = dir.join("out_pwd_env.pdf");
+    let out5 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_env_pdf)
+        .arg("--password-env")
+        .arg("WORDF_TEST_INTEG_PWD")
+        .env("WORDF_TEST_INTEG_PWD", password)
+        .output()
+        .expect("Failed to execute wordf");
+    assert_eq!(out5.status.code(), Some(0));
+    assert!(out_env_pdf.exists());
+
+    // 6. Successful conversion via --password-stdin
+    let out_stdin_pdf = dir.join("out_pwd_stdin.pdf");
+    let mut child = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_stdin_pdf)
+        .arg("--password-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn wordf");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(format!("{}\n", password).as_bytes())
+            .unwrap();
+    }
+    let out6 = child.wait_with_output().expect("Failed to wait on child");
+    assert_eq!(out6.status.code(), Some(0));
+    assert!(out_stdin_pdf.exists());
+
+    let _ = fs::remove_dir_all(&dir);
+}

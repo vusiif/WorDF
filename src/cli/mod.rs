@@ -5,6 +5,8 @@ pub mod analyze_route;
 pub mod args;
 pub mod batch;
 pub mod discovery;
+pub mod help;
+pub mod password;
 pub mod single;
 
 #[allow(unused_imports)]
