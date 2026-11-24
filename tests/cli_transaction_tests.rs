@@ -1802,6 +1802,16 @@ fn test_case_39_batch_case_variant_outputs_distinct() {
     fs::create_dir_all(&input_dir).unwrap();
     fs::create_dir_all(&output_dir).unwrap();
 
+    // Dynamically detect if filesystem is case-insensitive (e.g. macOS APFS default)
+    let probe_upper = dir.join("PROBE.TMP");
+    let probe_lower = dir.join("probe.tmp");
+    fs::write(&probe_upper, b"probe").unwrap();
+    if probe_lower.exists() {
+        let _ = fs::remove_dir_all(&dir);
+        return; // Safely skip distinct-name test on case-folding filesystems
+    }
+    let _ = fs::remove_file(&probe_upper);
+
     fs::write(
         input_dir.join("Mixed.docx"),
         make_test_docx("case variant A"),
