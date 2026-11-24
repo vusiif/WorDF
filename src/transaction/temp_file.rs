@@ -41,7 +41,7 @@ pub fn os_random_bytes(buf: &mut [u8]) -> io::Result<()> {
         use std::io::Read;
         let mut file = fs::File::open("/dev/urandom")?;
         file.read_exact(buf)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]
