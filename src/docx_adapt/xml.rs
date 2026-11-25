@@ -109,11 +109,10 @@ fn adapt_run_xml_prescanned(
     run_xml.to_string()
 }
 
-/// Adapts all runs in a document XML string for CJK fonts, skipping comments and CDATA.
-pub fn adapt_xml_text(
+/// Adapts all runs in a document XML string for CJK fonts using a unified FontResolver.
+pub fn adapt_xml_text_with_resolver(
     xml: &str,
-    fallback_font: &str,
-    available_fonts: &[String],
+    resolver: &crate::font::FontResolver,
 ) -> (String, usize) {
     let mut out = String::with_capacity(xml.len() + 1024);
     let mut total_cjk = 0;
@@ -170,8 +169,18 @@ pub fn adapt_xml_text(
                     let cjk_count = count_cjk_in_xml_text_nodes(run_slice);
                     total_cjk += cjk_count;
                     if cjk_count > 0 {
-                        let adapted =
-                            adapt_run_xml_prescanned(run_slice, fallback_font, available_fonts);
+                        let chosen_font = resolver.resolve_font_for_run(
+                            run_slice,
+                            resolver.primary_fallback_name.as_deref(),
+                        );
+                        let font_name = chosen_font
+                            .as_deref()
+                            .unwrap_or(crate::font::EMBEDDED_CJK_FONT_NAME);
+                        let adapted = adapt_run_xml_prescanned(
+                            run_slice,
+                            font_name,
+                            &resolver.available_fonts,
+                        );
                         out.push_str(&adapted);
                     } else {
                         out.push_str(run_slice);
@@ -188,6 +197,21 @@ pub fn adapt_xml_text(
 
     out.push_str(&xml[cursor..]);
     (out, total_cjk)
+}
+
+/// Adapts all runs in a document XML string for CJK fonts, skipping comments and CDATA.
+pub fn adapt_xml_text(
+    xml: &str,
+    fallback_font: &str,
+    available_fonts: &[String],
+) -> (String, usize) {
+    let resolver = crate::font::FontResolver::new(
+        crate::font::FontFallbackChain::new(),
+        available_fonts.to_vec(),
+        Some(fallback_font.to_string()),
+        None,
+    );
+    adapt_xml_text_with_resolver(xml, &resolver)
 }
 
 #[cfg(test)]

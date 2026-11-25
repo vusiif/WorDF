@@ -2,6 +2,7 @@
 //! License: GPL-3.0-or-later
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::BatchConfig;
@@ -75,9 +76,34 @@ pub fn execute_batch_item(
 
     let should_skip = if config.resume {
         if out_pdf.exists() {
-            let in_mtime = in_meta.modified().ok();
-            let out_mtime = out_pdf.metadata().and_then(|m| m.modified()).ok();
-            matches!((in_mtime, out_mtime), (Some(in_t), Some(out_t)) if out_t >= in_t)
+            let max_b = wordf::format::MAX_INPUT_BYTES;
+            if in_meta.len() > max_b as u64 {
+                false
+            } else if let Ok(mut file) = fs::File::open(in_path) {
+                let mut in_bytes = Vec::new();
+                let mut handle = (&mut file).take(max_b as u64 + 1);
+                if handle.read_to_end(&mut in_bytes).is_ok() && in_bytes.len() <= max_b {
+                    if wordf::crypto::decrypt_office_document(
+                        &in_bytes,
+                        config.options.password.as_deref(),
+                    )
+                    .is_err()
+                    {
+                        false
+                    } else {
+                        crate::cli::resume::check_resume_match(
+                            &in_bytes,
+                            &out_pdf,
+                            &config.options,
+                            config.strict,
+                        )
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -107,19 +133,33 @@ pub fn execute_batch_item(
     };
 
     match TaskExecutor::execute_file_to_file(&task_cfg) {
-        Ok(res) => BatchTaskResult::Succeeded {
-            item: BatchItemReport {
-                input_path: in_path.to_string_lossy().to_string(),
-                output_path: out_pdf.to_string_lossy().to_string(),
-                status: "succeeded".to_string(),
-                page_count: res.output.page_count,
-                elapsed_ms: res.total_ms,
-                error: None,
-            },
-            total_ms: res.total_ms,
-            pages: res.output.page_count,
-            out_pdf,
-        },
+        Ok(res) => {
+            if let Ok(mut file) = fs::File::open(in_path) {
+                let mut in_bytes = Vec::new();
+                let mut handle = (&mut file).take(wordf::format::MAX_INPUT_BYTES as u64 + 1);
+                if handle.read_to_end(&mut in_bytes).is_ok() {
+                    let fp = crate::cli::resume::compute_conversion_fingerprint(
+                        &in_bytes,
+                        &config.options,
+                        config.strict,
+                    );
+                    let _ = crate::cli::resume::write_resume_fingerprint(&out_pdf, &fp);
+                }
+            }
+            BatchTaskResult::Succeeded {
+                item: BatchItemReport {
+                    input_path: in_path.to_string_lossy().to_string(),
+                    output_path: out_pdf.to_string_lossy().to_string(),
+                    status: "succeeded".to_string(),
+                    page_count: res.output.page_count,
+                    elapsed_ms: res.total_ms,
+                    error: None,
+                },
+                total_ms: res.total_ms,
+                pages: res.output.page_count,
+                out_pdf,
+            }
+        }
         Err(err) => {
             eprintln!("Error converting {:?}: {}", in_path, err);
             let status = match err {

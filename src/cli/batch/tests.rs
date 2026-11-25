@@ -187,7 +187,13 @@ fn test_batch_resume_skips_up_to_date_output() {
     assert_eq!(res, Err(1), "Fails conversion on invalid docx, not skipped");
 
     std::thread::sleep(std::time::Duration::from_millis(50));
-    fs::write(&pdf_path, b"%PDF-1.4 dummy").unwrap();
+    fs::write(&pdf_path, b"%PDF-1.4 dummy header trailer %%EOF").unwrap();
+    let fp = crate::cli::resume::compute_conversion_fingerprint(
+        b"dummy docx bytes",
+        &config.options,
+        config.strict,
+    );
+    let _ = crate::cli::resume::write_resume_fingerprint(&pdf_path, &fp);
 
     let summary =
         run_batch_conversion(&config).expect("Must succeed by skipping up-to-date output");

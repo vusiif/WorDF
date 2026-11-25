@@ -129,22 +129,7 @@ fn main() {
     }
 
     let is_streaming = input_path.as_os_str() == "-" || output_path.as_os_str() == "-";
-    let mut effective_overwrite = args.overwrite;
-    if args.resume && !is_streaming && output_path.exists() {
-        let in_mtime = input_path.metadata().and_then(|m| m.modified()).ok();
-        let out_mtime = output_path.metadata().and_then(|m| m.modified()).ok();
-        if matches!((in_mtime, out_mtime), (Some(in_t), Some(out_t)) if out_t >= in_t) {
-            if !args.quiet {
-                eprintln!(
-                    "WorDF: Output {:?} is up-to-date with input {:?}. Skipping conversion (--resume).",
-                    output_path, input_path
-                );
-            }
-            process::exit(0);
-        } else {
-            effective_overwrite = true;
-        }
-    }
+    let effective_overwrite = args.overwrite || (args.resume && !is_streaming);
 
     // Route: Single File Conversion
     let target_paths = TargetPaths {
@@ -165,6 +150,7 @@ fn main() {
         discovered_fonts: &discovered_fonts,
         font_policy,
         strict: args.strict,
+        resume: args.resume,
         quiet: args.quiet,
         verbose: args.verbose,
         t_start,

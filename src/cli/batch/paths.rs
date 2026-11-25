@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use wordf::transaction::{check_future_target_alias, is_same_file};
 
-pub const MAX_BATCH_WORKERS: usize = 64;
+pub const MAX_BATCH_WORKERS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct BatchItemPlan {

@@ -4,6 +4,7 @@
 pub mod chain;
 pub mod cmap;
 pub mod family;
+pub mod resolver;
 
 use std::ops::Deref;
 #[cfg(feature = "embedded-cjk-font")]
@@ -12,6 +13,7 @@ use std::sync::OnceLock;
 pub use chain::{FallbackFontItem, FontFallbackChain};
 pub use cmap::{FontCmap, Format12Group, Format4Subtable};
 pub use family::extract_font_family_names;
+pub use resolver::FontResolver;
 
 /// Built-in fallback font primary family name.
 pub const EMBEDDED_CJK_FONT_NAME: &str = "LXGW WenKai Lite";

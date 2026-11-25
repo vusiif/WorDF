@@ -7,6 +7,7 @@ pub mod batch;
 pub mod discovery;
 pub mod help;
 pub mod password;
+pub mod resume;
 pub mod single;
 
 #[allow(unused_imports)]

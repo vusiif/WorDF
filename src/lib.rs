@@ -74,6 +74,48 @@ impl Default for ConversionOptions {
     }
 }
 
+impl ConversionOptions {
+    /// Returns the unified `FontResolver` configured from these options.
+    pub fn font_resolver(&self) -> font::FontResolver {
+        let embedded_bytes = font::embedded_cjk_font_bytes();
+        let fallback_name = self.fallback_font_name.clone().or_else(|| {
+            if !embedded_bytes.is_empty() {
+                Some(font::EMBEDDED_CJK_FONT_NAME.to_string())
+            } else {
+                None
+            }
+        });
+        let fallback_bytes = self.fallback_font_bytes.clone().or_else(|| {
+            if !embedded_bytes.is_empty() {
+                Some(embedded_bytes.to_vec())
+            } else {
+                None
+            }
+        });
+
+        let mut available = self.available_font_names.clone();
+        for name in font::embedded_cjk_font_names() {
+            if !available.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                available.push(name);
+            }
+        }
+        if let Some(ref chain) = self.fallback_chain {
+            for name in chain.all_font_names() {
+                if !available.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                    available.push(name);
+                }
+            }
+        }
+
+        font::FontResolver::new(
+            self.fallback_chain.clone().unwrap_or_default(),
+            available,
+            fallback_name,
+            fallback_bytes,
+        )
+    }
+}
+
 /// Stable diagnostic warning entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {

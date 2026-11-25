@@ -2070,3 +2070,213 @@ fn test_case_43_secure_password_carrier_options() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_case_44_resume_skips_when_fingerprint_matches() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case44_resume_fp");
+    let in_file = dir.join("doc.docx");
+    let out_file = dir.join("doc.pdf");
+    let rep_file = dir.join("rep.json");
+
+    fs::write(&in_file, make_test_docx("Resume Fingerprint Match Content")).unwrap();
+
+    // 1. Initial conversion
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .output()
+        .expect("Failed initial conversion");
+    assert_eq!(out1.status.code(), Some(0));
+    assert!(out_file.exists());
+
+    let mtime_1 = out_file.metadata().unwrap().modified().unwrap();
+
+    // 2. Second conversion with --resume and --report-json
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--resume")
+        .arg("--report-json")
+        .arg(&rep_file)
+        .output()
+        .expect("Failed resume conversion");
+    assert_eq!(out2.status.code(), Some(0));
+
+    let mtime_2 = out_file.metadata().unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_1, mtime_2,
+        "PDF must not be touched on fingerprint match"
+    );
+
+    let rep_content = fs::read_to_string(&rep_file).unwrap();
+    assert!(rep_content.contains(r#""conversion_status": "skipped""#));
+    assert!(rep_content.contains(r#""delivery_status": "skipped""#));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_45_resume_reconverts_on_param_or_font_change() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case45_resume_reconverts");
+    let in_file = dir.join("doc.docx");
+    let out_file = dir.join("doc.pdf");
+
+    fs::write(&in_file, make_test_docx("Param change triggers reconvert")).unwrap();
+
+    // 1. Initial conversion
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .output()
+        .expect("Failed initial conversion");
+    assert_eq!(out1.status.code(), Some(0));
+    let mtime_1 = out_file.metadata().unwrap().modified().unwrap();
+
+    // 2. Run with --resume but different metadata parameter (--author "New Author")
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--resume")
+        .arg("--author")
+        .arg("New Author")
+        .output()
+        .expect("Failed reconversion");
+    assert_eq!(out2.status.code(), Some(0));
+
+    let mtime_2 = out_file.metadata().unwrap().modified().unwrap();
+    assert!(
+        mtime_2 > mtime_1,
+        "Output PDF must be regenerated when options change"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_46_resume_reconverts_on_corrupt_pdf() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case46_resume_corrupt");
+    let in_file = dir.join("doc.docx");
+    let out_file = dir.join("doc.pdf");
+
+    fs::write(&in_file, make_test_docx("Corrupt PDF recovery test")).unwrap();
+
+    // 1. Initial conversion
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .output()
+        .expect("Failed initial conversion");
+    assert_eq!(out1.status.code(), Some(0));
+
+    // 2. Corrupt the output PDF
+    fs::write(&out_file, b"corrupted truncated data without pdf header").unwrap();
+
+    // 3. Run with --resume -> must detect corrupt PDF and re-convert
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--resume")
+        .output()
+        .expect("Failed recovery conversion");
+    assert_eq!(out2.status.code(), Some(0));
+
+    let pdf_bytes = fs::read(&out_file).unwrap();
+    assert!(
+        pdf_bytes.starts_with(b"%PDF-"),
+        "Must have re-generated a valid PDF"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_47_resume_encrypted_file_fails_without_password() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case47_resume_encrypted");
+    let in_file = dir.join("encrypted.docx");
+    let out_file = dir.join("encrypted.pdf");
+    let password = "SecretResumePass!";
+
+    let docx = make_test_docx("Encrypted Document Resume Test");
+    let encrypted_cfb = wordf::crypto::agile::build_agile_encrypted_cfb_for_test(&docx, password);
+    fs::write(&in_file, &encrypted_cfb).unwrap();
+
+    // 1. Initial conversion WITH password succeeds
+    let out1 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--password")
+        .arg(password)
+        .output()
+        .expect("Failed initial conversion with password");
+    assert_eq!(out1.status.code(), Some(0));
+    assert!(out_file.exists());
+
+    // 2. Run again with --resume WITHOUT password -> MUST FAIL with exit code 3 (Encrypted)
+    let out2 = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--resume")
+        .output()
+        .expect("Failed resume execution");
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "Resume must NEVER bypass password authentication on encrypted files"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_case_48_font_resolver_multi_tier_conversion() {
+    let bin = get_bin_path();
+    let dir = setup_test_sandbox("case48_font_resolver");
+    let font_a = dir.join("font_alpha.ttf");
+    let font_b = dir.join("font_beta.ttf");
+    let in_file = dir.join("compound.docx");
+    let out_file = dir.join("compound.pdf");
+
+    // Font Alpha covers '甲' (U+7532)
+    fs::write(&font_a, build_minimal_ttf_format12(0x7532)).unwrap();
+    // Font Beta covers '乙' (U+4E59)
+    fs::write(&font_b, build_minimal_ttf_format12(0x4E59)).unwrap();
+
+    // Document contains both '甲' and '乙'
+    fs::write(&in_file, make_test_docx("甲乙")).unwrap();
+
+    // Full conversion with multi-font fallback chain
+    let chain_arg = format!("{},{}", font_a.to_string_lossy(), font_b.to_string_lossy());
+    let out = Command::new(&bin)
+        .arg(&in_file)
+        .arg("-o")
+        .arg(&out_file)
+        .arg("--font-path")
+        .arg(&chain_arg)
+        .output()
+        .expect("Failed to execute wordf in multi-font chain mode");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "Full PDF conversion must succeed when fallback chain covers all characters"
+    );
+    assert!(out_file.exists());
+    let pdf_bytes = fs::read(&out_file).unwrap();
+    assert!(pdf_bytes.starts_with(b"%PDF-"));
+
+    let _ = fs::remove_dir_all(&dir);
+}

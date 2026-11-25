@@ -1,7 +1,7 @@
 //! WorDF backend dispatch (DOC via rwml DOCX bridge, DOCX via docxide-pdf).
 //! License: GPL-3.0-or-later
 
-use crate::docx_adapt::adapt_docx_cjk_in_memory_with_bytes;
+use crate::docx_adapt::adapt_docx_cjk_with_resolver;
 use crate::{
     ConversionError, ConversionErrorKind, ConversionOptions, ConversionOutput, Diagnostic,
 };
@@ -58,47 +58,11 @@ pub fn convert_docx_route_c(
         );
     }
 
-    let (fallback_name, fallback_bytes) = match options.fallback_font_name.as_deref() {
-        Some(name) => {
-            let bytes = options.fallback_font_bytes.as_deref().or_else(|| {
-                if !embedded_bytes.is_empty()
-                    && (name == crate::font::EMBEDDED_CJK_FONT_NAME
-                        || name == crate::font::EMBEDDED_CJK_FONT_NAME_ALT)
-                {
-                    Some(embedded_bytes)
-                } else {
-                    None
-                }
-            });
-            (Some(name), bytes)
-        }
-        None => {
-            if !embedded_bytes.is_empty() {
-                (
-                    Some(crate::font::EMBEDDED_CJK_FONT_NAME),
-                    Some(embedded_bytes),
-                )
-            } else {
-                (None, None)
-            }
-        }
-    };
+    let resolver = options.font_resolver();
+    let (adapted_docx, cjk_count) = adapt_docx_cjk_with_resolver(bytes, &resolver)?;
+    let fallback_name = resolver.primary_fallback_name.as_deref();
 
-    let mut available_fonts = options.available_font_names.clone();
-    for name in crate::font::embedded_cjk_font_names() {
-        if !available_fonts.contains(&name) {
-            available_fonts.push(name);
-        }
-    }
-
-    let (adapted_docx, cjk_count) = adapt_docx_cjk_in_memory_with_bytes(
-        bytes,
-        fallback_name,
-        fallback_bytes,
-        &available_fonts,
-    )?;
-
-    if cjk_count > 0 && fallback_name.is_none() {
+    if cjk_count > 0 && fallback_name.is_none() && resolver.fallback_chain.is_empty() {
         return Err(ConversionError {
             kind: ConversionErrorKind::MissingFont,
             message: format!(

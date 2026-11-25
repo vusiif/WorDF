@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::io::{Cursor, Read};
 
 use crate::docx_adapt::for_each_xml_text_node;
-use crate::font::{count_cjk_chars, is_cjk_char, FontCmap};
+use crate::font::{count_cjk_chars, is_cjk_char};
 use crate::format::doc::validate_doc_package;
 use crate::format::docx::validate_docx_package;
 use crate::format::{DOC_MAGIC, ZIP_MAGIC};
@@ -83,17 +83,7 @@ fn analyze_docx_package(
     let mut missing_glyphs = Vec::new();
     let mut warnings = Vec::new();
 
-    // Font cmap lookup if font is available
-    let fallback_font_bytes: Option<&[u8]> = options.fallback_font_bytes.as_deref().or_else(|| {
-        let b = crate::font::embedded_cjk_font_bytes();
-        if b.is_empty() {
-            None
-        } else {
-            Some(b)
-        }
-    });
-    let font_cmap = fallback_font_bytes.and_then(FontCmap::from_bytes);
-
+    let resolver = options.font_resolver();
     let mut checked_chars = HashSet::new();
 
     for i in 0..zip.len() {
@@ -162,19 +152,9 @@ fn analyze_docx_package(
                 for_each_xml_text_node(&xml_content, |text| {
                     cjk_char_count += count_cjk_chars(text);
                     for c in text.chars() {
-                        if is_cjk_char(c) && checked_chars.insert(c) {
-                            let is_covered = if let Some(ref chain) = options.fallback_chain {
-                                chain.resolve_glyph(c).is_some()
-                            } else if let (Some(cmap), Some(f_bytes)) =
-                                (&font_cmap, fallback_font_bytes)
-                            {
-                                cmap.has_glyph(c, f_bytes)
-                            } else {
-                                true
-                            };
-                            if !is_covered {
-                                missing_glyphs.push(c);
-                            }
+                        if is_cjk_char(c) && checked_chars.insert(c) && !resolver.is_char_covered(c)
+                        {
+                            missing_glyphs.push(c);
                         }
                     }
                 });

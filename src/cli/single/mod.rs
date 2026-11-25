@@ -25,6 +25,7 @@ pub struct SingleConfig<'a> {
     pub discovered_fonts: &'a DiscoveredFonts,
     pub font_policy: &'static str,
     pub strict: bool,
+    pub resume: bool,
     pub quiet: bool,
     pub verbose: bool,
     pub t_start: Instant,
@@ -32,6 +33,53 @@ pub struct SingleConfig<'a> {
 
 pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
     let input_bytes = read_input_bytes(&config.validated.input_canonical);
+
+    // Validate encryption and password fail-fast before attempting resume or conversion
+    if let Err(e) =
+        wordf::crypto::decrypt_office_document(&input_bytes, config.options.password.as_deref())
+    {
+        eprintln!("Error during conversion: {}", e);
+        process::exit(map_conversion_error_to_exit_code(&e.kind));
+    }
+
+    let is_streaming = config.validated.input_canonical.as_os_str() == "-"
+        || config.validated.output_pdf_path.as_os_str() == "-";
+
+    if config.resume
+        && !is_streaming
+        && config.validated.output_pdf_path.exists()
+        && crate::cli::resume::check_resume_match(
+            &input_bytes,
+            &config.validated.output_pdf_path,
+            config.options,
+            config.strict,
+        )
+    {
+        if let Some(ref rep_path) = config.validated.report_json_path {
+            let meta = ReportMeta {
+                input_bytes: &input_bytes,
+                warnings: &[],
+                pdf_bytes_len: fs::metadata(&config.validated.output_pdf_path)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0),
+                page_count: 0,
+                conversion_status: "skipped",
+                delivery_status: "skipped",
+                conv_ms: 0.0,
+            };
+            if let Err(e) = write_report_file(rep_path, config, &meta) {
+                eprintln!("Error writing JSON report {:?}: {}", rep_path, e);
+                process::exit(4);
+            }
+        }
+        if !config.quiet {
+            eprintln!(
+                "WorDF: Output {:?} is up-to-date with input {:?}. Skipping conversion (--resume).",
+                config.validated.output_pdf_path, config.validated.input_canonical
+            );
+        }
+        process::exit(0);
+    }
 
     if config.verbose {
         eprintln!(
@@ -169,6 +217,13 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
         process::exit(code);
     }
 
+    let fp = crate::cli::resume::compute_conversion_fingerprint(
+        &input_bytes,
+        config.options,
+        config.strict,
+    );
+    let _ = crate::cli::resume::write_resume_fingerprint(&config.validated.output_pdf_path, &fp);
+
     if config.verbose {
         eprintln!(
             "[verbose] Committed PDF to {:?} (total elapsed: {:.2}ms)",
@@ -181,41 +236,31 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
 }
 
 fn read_input_bytes(path: &Path) -> Vec<u8> {
-    if path.as_os_str() == "-" {
-        let mut buf = Vec::new();
-        let mut handle = std::io::stdin().take(MAX_INPUT_BYTES as u64 + 1);
-        if handle.read_to_end(&mut buf).is_err() {
-            eprintln!("Error reading input from stdin");
-            process::exit(4);
-        }
-        if buf.len() > MAX_INPUT_BYTES {
-            eprintln!(
-                "Error: Stdin input size exceeds maximum limit of {} bytes (128 MiB)",
-                MAX_INPUT_BYTES
-            );
-            process::exit(6);
-        }
-        buf
+    let reader: Box<dyn Read> = if path.as_os_str() == "-" {
+        Box::new(std::io::stdin())
     } else {
-        let file = fs::File::open(path).unwrap_or_else(|e| {
+        Box::new(fs::File::open(path).unwrap_or_else(|e| {
             eprintln!("Error reading input file {:?}: {}", path, e);
             process::exit(4);
-        });
-        let mut buf = Vec::new();
-        let mut handle = file.take(MAX_INPUT_BYTES as u64 + 1);
-        if let Err(e) = handle.read_to_end(&mut buf) {
-            eprintln!("Error reading input file {:?}: {}", path, e);
-            process::exit(4);
-        }
-        if buf.len() > MAX_INPUT_BYTES {
-            eprintln!(
-                "Error: Input file {:?} size exceeds maximum limit of {} bytes (128 MiB)",
-                path, MAX_INPUT_BYTES
-            );
-            process::exit(6);
-        }
-        buf
+        }))
+    };
+    let mut buf = Vec::new();
+    if reader
+        .take(MAX_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
+        eprintln!("Error reading input file {:?}", path);
+        process::exit(4);
     }
+    if buf.len() > MAX_INPUT_BYTES {
+        eprintln!(
+            "Error: Input size exceeds maximum limit of {} bytes (128 MiB)",
+            MAX_INPUT_BYTES
+        );
+        process::exit(6);
+    }
+    buf
 }
 
 fn deliver_stdout(config: &SingleConfig<'_>, pdf_bytes: &[u8], meta: &ReportMeta<'_>) -> ! {

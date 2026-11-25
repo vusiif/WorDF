@@ -7,18 +7,16 @@ pub mod xml_util;
 
 pub use styles::{adapt_styles_xml, is_styles_part};
 pub use xml::{
-    adapt_run_xml, adapt_xml_text, count_cjk_in_xml_text_nodes, for_each_xml_text_node,
-    is_text_part,
+    adapt_run_xml, adapt_xml_text, adapt_xml_text_with_resolver, count_cjk_in_xml_text_nodes,
+    for_each_xml_text_node, is_text_part,
 };
 pub use xml_util::extract_attribute_value;
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::io::{Cursor, Read, Write};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::font::{is_cjk_char, FontCmap};
 use crate::{ConversionError, ConversionErrorKind};
 
 pub fn adapt_docx_cjk_in_memory<'a>(
@@ -35,6 +33,19 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
     fallback_font_bytes: Option<&[u8]>,
     available_fonts: &[String],
 ) -> Result<(Cow<'a, [u8]>, usize), ConversionError> {
+    let resolver = crate::font::FontResolver::new(
+        crate::font::FontFallbackChain::new(),
+        available_fonts.to_vec(),
+        fallback_font.map(|s| s.to_string()),
+        fallback_font_bytes.map(|b| b.to_vec()),
+    );
+    adapt_docx_cjk_with_resolver(docx_bytes, &resolver)
+}
+
+pub fn adapt_docx_cjk_with_resolver<'a>(
+    docx_bytes: &'a [u8],
+    resolver: &crate::font::FontResolver,
+) -> Result<(Cow<'a, [u8]>, usize), ConversionError> {
     let reader = Cursor::new(docx_bytes);
     let mut archive = ZipArchive::new(reader).map_err(|e| ConversionError {
         kind: ConversionErrorKind::CorruptInput,
@@ -45,16 +56,6 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
     let mut writer = ZipWriter::new(&mut out_buf);
     let mut total_cjk_in_package = 0;
     let mut modified_entries = 0;
-
-    let font_cmap = if let Some(fb_bytes) = fallback_font_bytes {
-        if !fb_bytes.is_empty() && fb_bytes == crate::font::embedded_cjk_font_bytes() {
-            crate::font::get_or_init_embedded_font_cmap(fb_bytes).cloned()
-        } else {
-            FontCmap::from_bytes(fb_bytes)
-        }
-    } else {
-        None
-    };
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| ConversionError {
@@ -81,29 +82,23 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                 });
             }
 
-            // Glyph coverage fail-fast check
-            if let (Some(cmap), Some(f_bytes)) = (&font_cmap, fallback_font_bytes) {
-                let mut missing_chars = Vec::new();
-                let mut checked_chars = HashSet::new();
-                for_each_xml_text_node(&xml_content, |text| {
-                    for c in text.chars() {
-                        if is_cjk_char(c) && checked_chars.insert(c) && !cmap.has_glyph(c, f_bytes)
-                        {
-                            missing_chars.push(c);
-                        }
-                    }
-                });
-
+            // Glyph coverage fail-fast check using unified FontResolver
+            if resolver.has_fallback() {
+                let missing_chars = resolver.find_missing_glyphs(&xml_content);
                 if !missing_chars.is_empty() {
                     let missing_summary: Vec<String> = missing_chars
                         .iter()
                         .map(|&c| format!("'{}' (U+{:04X})", c, c as u32))
                         .collect();
+                    let font_desc = resolver
+                        .primary_fallback_name
+                        .as_deref()
+                        .unwrap_or("fallback font chain");
                     return Err(ConversionError {
                         kind: ConversionErrorKind::MissingFont,
                         message: format!(
                             "Font diagnostic failure: fallback font '{}' lacks glyphs for {} East Asian characters in '{}': [{}]",
-                            fallback_font.unwrap_or("unknown"),
+                            font_desc,
                             missing_chars.len(),
                             name,
                             missing_summary.join(", ")
@@ -112,37 +107,33 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                 }
             }
 
-            if let Some(fb) = fallback_font {
-                let (adapted_xml, cjk_count) = adapt_xml_text(&xml_content, fb, available_fonts);
-                total_cjk_in_package += cjk_count;
+            let (adapted_xml, cjk_count) = adapt_xml_text_with_resolver(&xml_content, resolver);
+            total_cjk_in_package += cjk_count;
 
-                if adapted_xml != xml_content {
-                    let options = SimpleFileOptions::default()
-                        .compression_method(file.compression())
-                        .unix_permissions(file.unix_mode().unwrap_or(0o644));
+            if adapted_xml != xml_content {
+                let options = SimpleFileOptions::default()
+                    .compression_method(file.compression())
+                    .unix_permissions(file.unix_mode().unwrap_or(0o644));
 
-                    writer
-                        .start_file(&name, options)
-                        .map_err(|e| ConversionError {
-                            kind: ConversionErrorKind::Internal,
-                            message: format!("Failed to write adapted zip entry '{}': {}", name, e),
-                        })?;
-                    writer
-                        .write_all(adapted_xml.as_bytes())
-                        .map_err(|e| ConversionError {
-                            kind: ConversionErrorKind::Internal,
-                            message: format!("Failed to write data for '{}': {}", name, e),
-                        })?;
-                    modified_entries += 1;
-                    continue;
-                }
-            } else {
-                total_cjk_in_package += count_cjk_in_xml_text_nodes(&xml_content);
+                writer
+                    .start_file(&name, options)
+                    .map_err(|e| ConversionError {
+                        kind: ConversionErrorKind::Internal,
+                        message: format!("Failed to write adapted zip entry '{}': {}", name, e),
+                    })?;
+                writer
+                    .write_all(adapted_xml.as_bytes())
+                    .map_err(|e| ConversionError {
+                        kind: ConversionErrorKind::Internal,
+                        message: format!("Failed to write data for '{}': {}", name, e),
+                    })?;
+                modified_entries += 1;
+                continue;
             }
         }
 
         if is_styles_part(&name) {
-            if let Some(fb) = fallback_font {
+            if let Some(fb) = resolver.primary_fallback_name.as_deref() {
                 let max_bytes = crate::format::docx::MAX_DOCX_AUX_XML_BYTES;
                 let mut xml_content =
                     String::with_capacity(uncompressed_size.min(max_bytes as usize));
@@ -150,7 +141,8 @@ pub fn adapt_docx_cjk_in_memory_with_bytes<'a>(
                 if handle.read_to_string(&mut xml_content).is_ok()
                     && xml_content.len() as u64 <= max_bytes
                 {
-                    let adapted_styles = adapt_styles_xml(&xml_content, fb, available_fonts);
+                    let adapted_styles =
+                        adapt_styles_xml(&xml_content, fb, &resolver.available_fonts);
                     if adapted_styles != xml_content {
                         let options = SimpleFileOptions::default()
                             .compression_method(file.compression())
