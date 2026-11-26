@@ -9,10 +9,10 @@ use crate::{ConversionError, ConversionErrorKind};
 pub const MAX_DOCX_ENTRIES: usize = 1_000;
 pub const MAX_DOCX_TOTAL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 pub const MAX_DOCX_MAIN_XML_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
-pub const MAX_DOCX_AUX_XML_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
+pub const MAX_DOCX_AUX_XML_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
 pub const MAX_DOCX_MEDIA_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 pub const MAX_IMAGE_DIMENSION: usize = 8_192;
-pub const MAX_IMAGE_PIXELS: usize = 16_777_216; // 16 Mpx
+pub const MAX_IMAGE_PIXELS: usize = 67_108_864; // 64 Mpx (8192 x 8192)
 
 /// Validate DOCX ZIP container, check mandatory parts, limits, and potential bombs.
 pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {

@@ -2,7 +2,7 @@
 //! License: GPL-3.0-or-later
 
 pub const TOOL_NAME: &str = "wordf";
-pub const TOOL_VERSION: &str = "1.0.0";
+pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn print_help() {
     println!("WorDF: Independent DOC / DOCX to PDF converter in Rust");

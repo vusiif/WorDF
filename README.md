@@ -136,10 +136,10 @@ WorDF enforces defensive bounds against denial-of-service and malicious inputs:
 - **DOCX ZIP Entries**: Maximum 1,000 entries.
 - **DOCX Cumulative Decompression**: Maximum 64 MiB (`67,108,864` bytes).
 - **DOCX Main Document XML**: Maximum 16 MiB (`16,777,216` bytes).
-- **DOCX Auxiliary XML / Relations**: Maximum 2 MiB per part.
+- **DOCX Auxiliary XML / Relations**: Maximum 8 MiB per part.
 - **DOCX Media Items**: Maximum 20 MiB per item.
 - **Compression Ratio**: Capped at 100 : 1 for parts expanding beyond 1 MiB (ZIP bomb defense).
-- **Image Resolution**: Maximum 8,192 px per side, maximum 16,777,216 total pixels.
+- **Image Resolution**: Maximum 8,192 px per side, maximum 67,108,864 total pixels (64 Mpx).
 - **DOC CFB Streams**: Maximum 1,000 streams.
 - **DOC WordDocument Stream**: Maximum 64 MiB.
 

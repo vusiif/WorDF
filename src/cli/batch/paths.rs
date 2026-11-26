@@ -174,7 +174,9 @@ pub fn create_and_validate_batch_plan(
                 );
                 return Err(2);
             }
-            check_future_target_alias(&target, rep_path, "PDF output", "JSON report")?;
+            if target.parent().is_some_and(|p| p.exists()) {
+                check_future_target_alias(&target, rep_path, "PDF output", "JSON report")?;
+            }
         }
 
         items.push(BatchItemPlan {

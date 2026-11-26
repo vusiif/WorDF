@@ -7,23 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **Exit-code contract unification**: oversized inputs (> 128 MiB) now consistently exit `6` on every route (single-file previously exited `4`, stdin `1`); batch partial failure exit `1` and the corrected meaning of exit `2` are documented in the README exit-code table.
-- **Silent JSON report failures**: the stdout delivery route and strict-mode route now surface report write/commit errors on stderr; a stdout-route report failure exits `9` per contract instead of silently exiting `0`.
-- **Batch destination safety parity**: batch items now reject symlink destinations, directory destinations, and output/input entity aliases with the same rules as single-file mode (a symlink output is rejected, never silently replaced).
-- **Batch report failure exit code**: batch JSON report failures now exit `9` when PDF outputs were already committed (previously `4`), matching the README contract; report targets are validated up front so an invalid `--report-json` path fails before any conversion work.
-- **Case-variant collision detection**: batch output collision detection folds case only on case-insensitive filesystems (mirroring the single-file alias checks), so case-sensitive filesystems no longer reject genuinely distinct outputs.
-- **Non-UTF-8 file names**: batch conversion no longer fails documents whose file names are not valid UTF-8 (e.g. GBK names on Linux); the output PDF preserves the original stem byte-for-byte.
-- **Bounded input reads**: single-file and batch input reads are hard-capped at 128 MiB + 1 byte, closing the gap between the metadata size check and the actual read.
-- **README accuracy**: stdout `-` streaming support, filesystem access during font resolution, batch directory creation behavior, previously undocumented CLI options, and exit-code semantics corrected to match actual behavior.
+## [1.1.0] - 2026-11-26
+
+### Added
+- **Agile Encryption & Integrity Verification**:
+  - Structured streaming XML parser (`quick-xml`) for `<keyData>`, `<dataIntegrity>`, and `<encryptedKey>` supporting arbitrary formatting, namespaces, and strict rejection of unsupported ciphers/modes.
+  - Full MS-OFFCRYPTO `dataIntegrity` HMAC-SHA1/SHA256/SHA512 verification in constant time, strict payload length checks, and `ZeroizeBuffer` RAII wiping for derived keys and password buffers.
+  - Zero-heap-allocation fixed stack buffers inside the KDF spin loop (`derive_password_hash`).
+- **Secure Password Carriers**:
+  - Added `--password-prompt`, `--password-file <path>`, `--password-stdin`, and `--password-env <VAR>` with mutual-exclusion validation (exit code `2`) and `Debug` redaction on `CliArgs` and `ConversionOptions`.
+- **Unified `FontResolver` & Cascading Fallback**:
+  - Unified font glyph coverage and fallback decisions across `--analyze`, DOCX XML adaptation, and backend rendering, with `Cow<'static, [u8]>` zero-copy embedded font borrowing and multi-directory `DOCXIDE_FONTS` propagation.
+- **Versioned `--resume` Fingerprinting**:
+  - Replaced mtime-only checks with SHA-256 canonical conversion fingerprints (input hash, engine version, format, font policy, pages, metadata, strict flag, salted password hash) plus `%PDF-` / `%%EOF` output integrity validation.
+  - Encrypted inputs never bypass password authentication under `--resume`; single-file skips emit `"conversion_status": "skipped"` JSON reports.
 
 ### Changed
-- Repository-wide `cargo fmt` normalization; `cargo fmt --check` now passes with zero diffs.
-- Added GitHub Actions CI: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` on Windows, Linux and macOS, plus a `cargo audit` security job (expected to stay red until the zip advisories below are upgraded away).
-- Restored the project's ≤ 292 total line limit across all 47 source files after `cargo fmt` pushed six over it: split `crypto::agile` (parser / test builders / tests), `analyze` (engine / console rendering), `cli::single` (orchestrator / JSON report), batch report staging into `cli::batch::report`, the `--analyze` CLI route into `cli::analyze_route`, and moved the embedded CMap cache into `font`.
+- **Single-Pass DOCX Processing**: Merged CJK font adaptation and `docProps/core.xml` metadata injection into a single ZIP pass using `raw_copy_file` for unmodified entries.
+- **DOC Analysis Parity**: `analyze_doc_package` now bridges via `rwml` to produce accurate structural statistics and `layout.approximate` diagnostics.
+- **Batch Concurrency & Filesystem Safety**:
+  - Capped `MAX_BATCH_WORKERS` to `16` to bound peak memory across concurrent 128 MiB tasks.
+  - Unified `TaskExecutor::read_bounded_file` across single-file, batch, and `--analyze` routes; eliminated triple-read in batch `--resume` and double-decrypt in single-file mode.
+  - Dynamic directory case-sensitivity probing (`is_dir_case_insensitive`), `OsStr`/`OsString` preservation for non-UTF-8 filenames, and empty-directory `--report-json` commit.
+  - Hardened DOCX media dimension fallback read with `MAX_DOCX_MEDIA_BYTES`.
 
-### Security
-- `cargo audit` baseline recorded: 14 advisories across `zip` 2.6.1 (6) and `zip` 8.6.0 (8, including one 9.1 critical) plus 2 unmaintained warnings (`rustybuzz`, `ttf-parser`). All flagged code paths (`ZipArchive::extract`, `ZipStreamReader`, AES entries, legacy shrink/reduce/implode decoders) are either feature-disabled (`default-features = false, features = ["deflate"]`) or never called by WorDF — reachability verified by grep; upgrades tracked in `.agents/HANDOFF.md`.
+### Security & CI
+- Added GitHub Actions CI (`ubuntu-latest`, `windows-latest`, `macos-latest`) running `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`, and `cargo audit` (0 blocked vulnerabilities).
 
 ## [1.0.0] - 2026-11-21
 
