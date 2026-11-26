@@ -263,3 +263,21 @@ pub fn commit_two_phase(
 
     Ok(())
 }
+
+/// Probe whether `dir` is on a case-insensitive filesystem (handles macOS APFS and Windows NTFS flags).
+pub fn is_dir_case_insensitive(dir: &Path) -> bool {
+    let pid = std::process::id();
+    let lower = dir.join(format!(".wordf_case_probe_{}_a", pid));
+    let upper = dir.join(format!(".wordf_case_probe_{}_A", pid));
+    if let Ok(f) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lower)
+    {
+        drop(f);
+        let insensitive = is_same_file(&lower, &upper);
+        let _ = fs::remove_file(&lower);
+        return insensitive;
+    }
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}

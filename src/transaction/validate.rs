@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::atomic::{is_same_dir, is_same_file};
+use super::atomic::{is_dir_case_insensitive, is_same_dir, is_same_file};
 
 pub struct TargetPaths {
     pub input_path: PathBuf,
@@ -228,15 +228,16 @@ pub fn check_future_target_alias(
     let fname_a = path_a.file_name().unwrap_or_default();
     let fname_b = path_b.file_name().unwrap_or_default();
 
-    let same_name = if cfg!(windows) {
+    let same_parent = is_same_dir(parent_a, parent_b, &meta_a, &meta_b);
+    let same_name = if fname_a == fname_b {
+        true
+    } else if same_parent && is_dir_case_insensitive(parent_a) {
         fname_a
             .to_string_lossy()
             .eq_ignore_ascii_case(&fname_b.to_string_lossy())
     } else {
-        fname_a == fname_b
+        false
     };
-
-    let same_parent = is_same_dir(parent_a, parent_b, &meta_a, &meta_b);
 
     if same_parent && same_name {
         eprintln!(

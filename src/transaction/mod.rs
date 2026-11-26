@@ -6,7 +6,7 @@ pub mod executor;
 pub mod temp_file;
 pub mod validate;
 
-pub use atomic::{atomic_commit_rename, commit_two_phase, is_same_file};
+pub use atomic::{atomic_commit_rename, commit_two_phase, is_dir_case_insensitive, is_same_file};
 pub use executor::{TaskError, TaskExecutor, TaskFileConfig, TaskResult};
 pub use temp_file::{
     create_exclusive_temp_file, generate_unpredictable_temp_name, os_random_bytes, TempFileGuard,

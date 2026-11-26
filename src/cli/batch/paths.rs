@@ -2,11 +2,11 @@
 //! License: GPL-3.0-or-later
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use wordf::transaction::{check_future_target_alias, is_same_file};
+use wordf::transaction::{check_future_target_alias, is_dir_case_insensitive, is_same_file};
 
 pub const MAX_BATCH_WORKERS: usize = 16;
 
@@ -115,7 +115,8 @@ pub fn create_and_validate_batch_plan(
         }
     }
 
-    let mut target_map: HashMap<String, PathBuf> = HashMap::new();
+    let case_insensitive = is_dir_case_insensitive(output_dir);
+    let mut target_map: HashMap<OsString, PathBuf> = HashMap::new();
     let mut items = Vec::with_capacity(files.len());
 
     for in_path in files {
@@ -127,11 +128,25 @@ pub fn create_and_validate_batch_plan(
             }
         };
 
-        let normalized = target.to_string_lossy();
-        let target_key = if cfg!(windows) {
-            normalized.to_ascii_lowercase()
+        let target_key: OsString = if case_insensitive {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::{OsStrExt, OsStringExt};
+                OsString::from_vec(
+                    target
+                        .as_os_str()
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect(),
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                target.to_string_lossy().to_ascii_lowercase().into()
+            }
         } else {
-            normalized.into_owned()
+            target.as_os_str().to_os_string()
         };
 
         if let Some(prev) = target_map.insert(target_key, in_path.clone()) {

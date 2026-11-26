@@ -57,19 +57,29 @@ pub fn derive_password_hash(
     spin_count: u32,
     algo: HashAlgorithm,
 ) -> Vec<u8> {
-    let pwd_utf16: Vec<u8> = password
+    let mut pwd_utf16: Vec<u8> = password
         .encode_utf16()
         .flat_map(|c| c.to_le_bytes())
         .collect();
     let mut h_buf = Vec::with_capacity(salt.len() + pwd_utf16.len());
     h_buf.extend_from_slice(salt);
     h_buf.extend_from_slice(&pwd_utf16);
-    let mut h = algo.digest(&h_buf);
+    pwd_utf16.fill(0);
+
+    let digest_len = algo.digest_size();
+    let mut iter_buf = [0u8; 4 + 64];
+    let mut out_buf = [0u8; 64];
+    let total_len = 4 + digest_len;
+    algo.digest_into(&h_buf, &mut iter_buf[4..total_len]);
+    h_buf.fill(0);
+
     for i in 0..spin_count {
-        let mut iter_buf = Vec::with_capacity(4 + h.len());
-        iter_buf.extend_from_slice(&i.to_le_bytes());
-        iter_buf.extend_from_slice(&h);
-        h = algo.digest(&iter_buf);
+        iter_buf[..4].copy_from_slice(&i.to_le_bytes());
+        algo.digest_into(&iter_buf[..total_len], &mut out_buf[..digest_len]);
+        iter_buf[4..total_len].copy_from_slice(&out_buf[..digest_len]);
     }
-    h
+    let out = iter_buf[4..total_len].to_vec();
+    iter_buf.fill(0);
+    out_buf.fill(0);
+    out
 }

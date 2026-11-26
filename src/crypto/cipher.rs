@@ -27,24 +27,30 @@ impl HashAlgorithm {
         }
     }
 
-    pub fn digest(&self, data: &[u8]) -> Vec<u8> {
+    pub fn digest_into(&self, data: &[u8], out: &mut [u8]) {
         match self {
             Self::Sha512 => {
                 let mut hasher = sha2::Sha512::new();
                 Sha2Digest::update(&mut hasher, data);
-                Sha2Digest::finalize(hasher).to_vec()
+                out[..64].copy_from_slice(&Sha2Digest::finalize(hasher));
             }
             Self::Sha256 => {
                 let mut hasher = sha2::Sha256::new();
                 Sha2Digest::update(&mut hasher, data);
-                Sha2Digest::finalize(hasher).to_vec()
+                out[..32].copy_from_slice(&Sha2Digest::finalize(hasher));
             }
             Self::Sha1 => {
                 let mut hasher = sha1::Sha1::new();
                 Digest::update(&mut hasher, data);
-                Digest::finalize(hasher).to_vec()
+                out[..20].copy_from_slice(&Digest::finalize(hasher));
             }
         }
+    }
+
+    pub fn digest(&self, data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; self.digest_size()];
+        self.digest_into(data, &mut out);
+        out
     }
 
     pub fn block_size(&self) -> usize {
