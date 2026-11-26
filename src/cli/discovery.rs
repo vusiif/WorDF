@@ -10,6 +10,7 @@ use wordf::font::{extract_font_family_names, is_cjk_char, FontFallbackChain};
 pub struct DiscoveredFonts {
     pub font_bytes: Vec<Vec<u8>>,
     pub font_dir: Option<PathBuf>,
+    pub font_dirs: Vec<PathBuf>,
     pub family_names: Vec<String>,
     pub primary_cjk_fallback: Option<String>,
     pub primary_cjk_font_bytes: Option<Vec<u8>>,
@@ -33,6 +34,7 @@ pub fn inspect_font_chain(explicit_paths: &[String]) -> Result<DiscoveredFonts, 
     let mut df = DiscoveredFonts {
         font_bytes: Vec::new(),
         font_dir: None,
+        font_dirs: Vec::new(),
         family_names: Vec::new(),
         primary_cjk_fallback: None,
         primary_cjk_font_bytes: None,
@@ -51,9 +53,10 @@ pub fn inspect_font_chain(explicit_paths: &[String]) -> Result<DiscoveredFonts, 
     let mut candidate_paths: Vec<PathBuf> = explicit_paths.iter().map(PathBuf::from).collect();
     if candidate_paths.is_empty() {
         if let Ok(env_fp) = env::var("DOCXIDE_FONTS") {
-            let p = PathBuf::from(env_fp);
-            if p.exists() {
-                candidate_paths.push(p);
+            for p in env::split_paths(&env_fp) {
+                if p.exists() {
+                    candidate_paths.push(p);
+                }
             }
         }
     }
@@ -66,17 +69,24 @@ pub fn inspect_font_chain(explicit_paths: &[String]) -> Result<DiscoveredFonts, 
     for p in &candidate_paths {
         if p.is_file() {
             font_files.push(p.clone());
+            let dir = normalize_parent_dir(p.parent());
             if df.font_dir.is_none() {
-                df.font_dir = Some(normalize_parent_dir(p.parent()));
+                df.font_dir = Some(dir.clone());
+            }
+            if !df.font_dirs.contains(&dir) {
+                df.font_dirs.push(dir);
             }
         } else if p.is_dir() {
+            let dir = if p.as_os_str().is_empty() {
+                env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            } else {
+                p.clone()
+            };
             if df.font_dir.is_none() {
-                let dir = if p.as_os_str().is_empty() {
-                    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                } else {
-                    p.clone()
-                };
-                df.font_dir = Some(dir);
+                df.font_dir = Some(dir.clone());
+            }
+            if !df.font_dirs.contains(&dir) {
+                df.font_dirs.push(dir);
             }
             if let Ok(entries) = fs::read_dir(p) {
                 for entry in entries.flatten() {

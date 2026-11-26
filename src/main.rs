@@ -29,9 +29,11 @@ fn main() {
         Ok(df) => df,
         Err(code) => process::exit(code),
     };
-    if let Some(ref dir) = discovered_fonts.font_dir {
-        if !args.font_paths.is_empty() || env::var("DOCXIDE_FONTS").is_err() {
-            env::set_var("DOCXIDE_FONTS", dir);
+    if !discovered_fonts.font_dirs.is_empty()
+        && (!args.font_paths.is_empty() || env::var("DOCXIDE_FONTS").is_err())
+    {
+        if let Ok(joined) = env::join_paths(&discovered_fonts.font_dirs) {
+            env::set_var("DOCXIDE_FONTS", joined);
         }
     }
 

@@ -201,34 +201,33 @@ fn analyze_doc_package(
 ) -> Result<DocumentAnalysis, ConversionError> {
     validate_doc_package(bytes)?;
 
-    let mut stream_count = 0;
-    if let Ok(comp) = cfb::CompoundFile::open(Cursor::new(bytes)) {
-        for _ in comp.walk() {
-            stream_count += 1;
-        }
-    }
+    let document = rwml::Document::open(bytes).map_err(|e| ConversionError {
+        kind: ConversionErrorKind::CorruptInput,
+        message: format!("rwml DOC open error: {:?}", e),
+    })?;
+    let docx_bytes = rwml::try_write_docx(&document.model()).map_err(|e| ConversionError {
+        kind: ConversionErrorKind::BackendFailure,
+        message: format!("rwml DOCX bridge export error: {:?}", e),
+    })?;
+
+    let mut analysis = analyze_docx_package(&docx_bytes, options)?;
+    analysis.format_name = "Word 97-2003 Binary DOC".to_string();
+    analysis.input_bytes = bytes.len();
 
     let raw_meta = crate::metadata::doc::extract_doc_metadata(bytes);
-    let metadata = match &options.metadata {
+    analysis.metadata = match &options.metadata {
         Some(o) => raw_meta.merge_with_overrides(o),
         None => raw_meta,
     };
+    analysis.warnings.insert(
+        0,
+        Diagnostic {
+            code: "layout.approximate".to_string(),
+            message: "Preview-grade layout via rwml DOCX bridge".to_string(),
+        },
+    );
 
-    Ok(DocumentAnalysis {
-        format_name: "Word 97-2003 Binary DOC".to_string(),
-        input_bytes: bytes.len(),
-        paragraph_count: 0,
-        table_count: 0,
-        run_count: 0,
-        media_count: stream_count,
-        media_bytes: bytes.len() as u64,
-        header_footer_count: 0,
-        cjk_char_count: 0,
-        detected_fonts: Vec::new(),
-        missing_glyphs: Vec::new(),
-        metadata,
-        warnings: Vec::new(),
-    })
+    Ok(analysis)
 }
 
 fn count_xml_element_starts(haystack: &str, tag_name: &str) -> usize {

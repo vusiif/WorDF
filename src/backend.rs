@@ -1,7 +1,7 @@
 //! WorDF backend dispatch (DOC via rwml DOCX bridge, DOCX via docxide-pdf).
 //! License: GPL-3.0-or-later
 
-use crate::docx_adapt::adapt_docx_cjk_with_resolver;
+use crate::docx_adapt::adapt_docx_with_resolver_and_metadata;
 use crate::{
     ConversionError, ConversionErrorKind, ConversionOptions, ConversionOutput, Diagnostic,
 };
@@ -59,7 +59,8 @@ pub fn convert_docx_route_c(
     }
 
     let resolver = options.font_resolver();
-    let (adapted_docx, cjk_count) = adapt_docx_cjk_with_resolver(bytes, &resolver)?;
+    let (final_docx, cjk_count) =
+        adapt_docx_with_resolver_and_metadata(bytes, &resolver, options.metadata.as_ref())?;
     let fallback_name = resolver.primary_fallback_name.as_deref();
 
     if cjk_count > 0 && fallback_name.is_none() && resolver.fallback_chain.is_empty() {
@@ -71,13 +72,6 @@ pub fn convert_docx_route_c(
             ),
         });
     }
-
-    let final_docx: std::borrow::Cow<'_, [u8]> = match &options.metadata {
-        Some(meta) if !meta.is_empty() => std::borrow::Cow::Owned(
-            crate::metadata::docx::inject_docx_metadata(&adapted_docx, meta)?,
-        ),
-        _ => adapted_docx,
-    };
 
     let (pdf_bytes, raw_page_count) =
         docxide_pdf::convert_docx_bytes_to_pdf_bytes_with_page_filter(

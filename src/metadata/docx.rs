@@ -97,6 +97,34 @@ pub fn build_core_properties_xml(metadata: &DocumentMetadata) -> String {
     out
 }
 
+/// Patch `[Content_Types].xml` or `_rels/.rels` to register `docProps/core.xml` if absent.
+pub fn patch_core_manifest_entry(name: &str, data: Vec<u8>) -> Vec<u8> {
+    if name == "[Content_Types].xml" {
+        let mut ct_str = String::from_utf8_lossy(&data).to_string();
+        if !ct_str.contains("docProps/core.xml") {
+            if let Some(end_pos) = ct_str.find("</Types>") {
+                ct_str.insert_str(
+                    end_pos,
+                    "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\n",
+                );
+                return ct_str.into_bytes();
+            }
+        }
+    } else if name == "_rels/.rels" {
+        let mut rel_str = String::from_utf8_lossy(&data).to_string();
+        if !rel_str.contains("docProps/core.xml") {
+            if let Some(end_pos) = rel_str.find("</Relationships>") {
+                rel_str.insert_str(
+                    end_pos,
+                    "<Relationship Id=\"rIdCoreMeta\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\n",
+                );
+                return rel_str.into_bytes();
+            }
+        }
+    }
+    data
+}
+
 /// Inject or update metadata in DOCX bytes in memory.
 pub fn inject_docx_metadata(
     docx_bytes: &[u8],
@@ -163,29 +191,7 @@ pub fn inject_docx_metadata(
                 });
             }
 
-            if name == "[Content_Types].xml" {
-                let mut ct_str = String::from_utf8_lossy(&data).to_string();
-                if !ct_str.contains("docProps/core.xml") {
-                    if let Some(end_pos) = ct_str.find("</Types>") {
-                        ct_str.insert_str(
-                            end_pos,
-                            "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\n",
-                        );
-                        data = ct_str.into_bytes();
-                    }
-                }
-            } else {
-                let mut rel_str = String::from_utf8_lossy(&data).to_string();
-                if !rel_str.contains("docProps/core.xml") {
-                    if let Some(end_pos) = rel_str.find("</Relationships>") {
-                        rel_str.insert_str(
-                            end_pos,
-                            "<Relationship Id=\"rIdCoreMeta\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\n",
-                        );
-                        data = rel_str.into_bytes();
-                    }
-                }
-            }
+            let data = patch_core_manifest_entry(&name, data);
 
             zip_writer
                 .start_file(&name, opt)
