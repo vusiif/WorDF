@@ -68,46 +68,22 @@ pub fn run_analyze_route(args: &CliArgs, input_path: &Path, options: &Conversion
         }
         buf
     } else {
-        use std::io::Read;
-        let in_meta = match input_path.metadata() {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("Error reading metadata for {:?}: {}", input_path, e);
-                process::exit(4);
+        match wordf::transaction::TaskExecutor::read_bounded_file(input_path) {
+            Ok(buf) => buf,
+            Err(wordf::transaction::TaskError::SizeLimitExceeded(sz)) => {
+                eprintln!(
+                    "Error: Input file {:?} size ({} bytes) exceeds maximum limit of {} bytes (128 MiB)",
+                    input_path,
+                    sz,
+                    wordf::format::MAX_INPUT_BYTES
+                );
+                process::exit(6);
             }
-        };
-        if in_meta.len() > wordf::format::MAX_INPUT_BYTES as u64 {
-            eprintln!(
-                "Error: Input file {:?} size ({} bytes) exceeds maximum limit of {} bytes (128 MiB)",
-                input_path,
-                in_meta.len(),
-                wordf::format::MAX_INPUT_BYTES
-            );
-            process::exit(6);
-        }
-        let mut file = match fs::File::open(input_path) {
-            Ok(f) => f,
             Err(e) => {
                 eprintln!("Error reading input file {:?}: {}", input_path, e);
                 process::exit(4);
             }
-        };
-        let mut buf =
-            Vec::with_capacity(in_meta.len().min(wordf::format::MAX_INPUT_BYTES as u64) as usize);
-        let mut take_handle = (&mut file).take(wordf::format::MAX_INPUT_BYTES as u64 + 1);
-        if let Err(e) = take_handle.read_to_end(&mut buf) {
-            eprintln!("Error reading input file {:?}: {}", input_path, e);
-            process::exit(4);
         }
-        if buf.len() > wordf::format::MAX_INPUT_BYTES {
-            eprintln!(
-                "Error: Input file {:?} size exceeds maximum limit of {} bytes (128 MiB)",
-                input_path,
-                wordf::format::MAX_INPUT_BYTES
-            );
-            process::exit(6);
-        }
-        buf
     };
 
     let mut analysis = match analyze_document(&input_bytes, options) {

@@ -39,7 +39,7 @@ pub enum InputFormat {
 }
 
 /// Conversion options for the pure-memory byte API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConversionOptions {
     /// Expected input format or Auto.
     pub format: InputFormat,
@@ -57,6 +57,24 @@ pub struct ConversionOptions {
     pub password: Option<String>,
     /// Optional document metadata overrides (Title, Author, Subject, Keywords) to inject into PDF.
     pub metadata: Option<DocumentMetadata>,
+}
+
+impl fmt::Debug for ConversionOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConversionOptions")
+            .field("format", &self.format)
+            .field("fallback_font_name", &self.fallback_font_name)
+            .field(
+                "fallback_font_bytes",
+                &self.fallback_font_bytes.as_ref().map(|b| b.len()),
+            )
+            .field("available_font_names", &self.available_font_names)
+            .field("fallback_chain", &self.fallback_chain)
+            .field("pages", &self.pages)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl Default for ConversionOptions {
@@ -85,13 +103,14 @@ impl ConversionOptions {
                 None
             }
         });
-        let fallback_bytes = self.fallback_font_bytes.clone().or_else(|| {
-            if !embedded_bytes.is_empty() {
-                Some(embedded_bytes.to_vec())
-            } else {
-                None
-            }
-        });
+        let fallback_bytes: Option<std::borrow::Cow<'static, [u8]>> = match self
+            .fallback_font_bytes
+            .as_ref()
+        {
+            Some(b) => Some(std::borrow::Cow::Owned(b.clone())),
+            None if !embedded_bytes.is_empty() => Some(std::borrow::Cow::Borrowed(embedded_bytes)),
+            None => None,
+        };
 
         let mut available = self.available_font_names.clone();
         for name in font::embedded_cjk_font_names() {
@@ -107,7 +126,7 @@ impl ConversionOptions {
             }
         }
 
-        font::FontResolver::new(
+        font::FontResolver::from_cow(
             self.fallback_chain.clone().unwrap_or_default(),
             available,
             fallback_name,

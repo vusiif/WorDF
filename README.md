@@ -79,8 +79,12 @@ wordf --version
 - `--analyze`: Inspect and diagnose document compatibility without generating a PDF (no `-o` required).
 - `--pages <RANGE>`: Export only the specified pages (e.g. `1-3`, `2`, `1-3,5,8-10`).
 - `--password <string>`: Decryption password for password-protected documents.
+- `--password-prompt`: Read decryption password interactively from terminal without echoing.
+- `--password-file <path>`: Read decryption password from a file.
+- `--password-stdin`: Read decryption password from standard input.
+- `--password-env <VAR>`: Read decryption password from the specified environment variable.
 - `--title|--author|--subject|--keywords <string>`: Inject PDF metadata overrides.
-- `--resume`: Skip conversion when the target PDF already exists and is newer than the input.
+- `--resume`: Skip conversion only when the target PDF passes integrity checks and matches the versioned conversion fingerprint (input hash, options, fonts, metadata, strict mode, engine version).
 - `-r, --recursive`: Recursively scan subdirectories in batch directory conversion.
 - `--report-json <path>`: Optional path to write a machine-readable JSON execution report (`-` rejected).
 - `--font-path <path>`: Optional local font file or directory for offline font injection.

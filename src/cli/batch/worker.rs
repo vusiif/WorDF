@@ -2,7 +2,6 @@
 //! License: GPL-3.0-or-later
 
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::BatchConfig;
@@ -52,11 +51,6 @@ pub fn execute_batch_item(
         }
     }
 
-    let in_meta = match in_path.metadata() {
-        Ok(m) => m,
-        Err(e) => return failed_item(in_path, &out_pdf, format!("Metadata error: {}", e)),
-    };
-
     // Destination safety aligned with single-file mode: reject symlink and
     // directory destinations as well as output/input entity aliases before any
     // conversion work happens.
@@ -74,44 +68,38 @@ pub fn execute_batch_item(
         );
     }
 
-    let should_skip = if config.resume {
-        if out_pdf.exists() {
-            let max_b = wordf::format::MAX_INPUT_BYTES;
-            if in_meta.len() > max_b as u64 {
-                false
-            } else if let Ok(mut file) = fs::File::open(in_path) {
-                let mut in_bytes = Vec::new();
-                let mut handle = (&mut file).take(max_b as u64 + 1);
-                if handle.read_to_end(&mut in_bytes).is_ok() && in_bytes.len() <= max_b {
-                    if wordf::crypto::decrypt_office_document(
-                        &in_bytes,
-                        config.options.password.as_deref(),
-                    )
-                    .is_err()
-                    {
-                        false
-                    } else {
-                        crate::cli::resume::check_resume_match(
-                            &in_bytes,
-                            &out_pdf,
-                            &config.options,
-                            config.strict,
-                        )
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
+    if !config.resume && !config.overwrite && out_pdf.exists() {
+        return BatchTaskResult::Skipped {
+            item: BatchItemReport {
+                input_path: in_path.to_string_lossy().to_string(),
+                output_path: out_pdf.to_string_lossy().to_string(),
+                status: "skipped".to_string(),
+                page_count: 0,
+                elapsed_ms: 0.0,
+                error: None,
+            },
+        };
+    }
+
+    let in_bytes = match TaskExecutor::read_bounded_file(in_path) {
+        Ok(b) => b,
+        Err(err) => {
+            eprintln!("Error converting {:?}: {}", in_path, err);
+            return failed_item(in_path, &out_pdf, err.to_string());
         }
-    } else {
-        !config.overwrite && out_pdf.exists()
     };
 
-    if should_skip {
+    if config.resume
+        && out_pdf.exists()
+        && wordf::crypto::decrypt_office_document(&in_bytes, config.options.password.as_deref())
+            .is_ok()
+        && crate::cli::resume::check_resume_match(
+            &in_bytes,
+            &out_pdf,
+            &config.options,
+            config.strict,
+        )
+    {
         return BatchTaskResult::Skipped {
             item: BatchItemReport {
                 input_path: in_path.to_string_lossy().to_string(),
@@ -132,20 +120,14 @@ pub fn execute_batch_item(
         overwrite: config.overwrite || config.resume,
     };
 
-    match TaskExecutor::execute_file_to_file(&task_cfg) {
+    match TaskExecutor::execute_bytes_to_file(&in_bytes, &task_cfg) {
         Ok(res) => {
-            if let Ok(mut file) = fs::File::open(in_path) {
-                let mut in_bytes = Vec::new();
-                let mut handle = (&mut file).take(wordf::format::MAX_INPUT_BYTES as u64 + 1);
-                if handle.read_to_end(&mut in_bytes).is_ok() {
-                    let fp = crate::cli::resume::compute_conversion_fingerprint(
-                        &in_bytes,
-                        &config.options,
-                        config.strict,
-                    );
-                    let _ = crate::cli::resume::write_resume_fingerprint(&out_pdf, &fp);
-                }
-            }
+            let fp = crate::cli::resume::compute_conversion_fingerprint(
+                &in_bytes,
+                &config.options,
+                config.strict,
+            );
+            let _ = crate::cli::resume::write_resume_fingerprint(&out_pdf, &fp);
             BatchTaskResult::Succeeded {
                 item: BatchItemReport {
                     input_path: in_path.to_string_lossy().to_string(),

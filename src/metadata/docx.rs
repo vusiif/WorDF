@@ -11,14 +11,26 @@ use crate::{ConversionError, ConversionErrorKind};
 fn extract_tag_value(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{}", tag);
     let start_idx = xml.find(&open)?;
-    let content_start = start_idx + xml[start_idx..].find('>')? + 1;
+    let tag_tail = &xml[start_idx + open.len()..];
+    let gt_rel = tag_tail.find('>')?;
+    if gt_rel > 0 && tag_tail.as_bytes()[gt_rel - 1] == b'/' {
+        return None;
+    }
+    let content_start = start_idx + open.len() + gt_rel + 1;
     let close = format!("</{}", tag);
     let end_idx = content_start + xml[content_start..].find(&close)?;
-    let text = xml[content_start..end_idx].trim();
-    if text.is_empty() {
+    let raw = xml[content_start..end_idx].trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let unescaped = quick_xml::escape::unescape(raw)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| raw.to_string());
+    let trimmed = unescaped.trim();
+    if trimmed.is_empty() {
         None
     } else {
-        Some(text.to_string())
+        Some(trimmed.to_string())
     }
 }
 
@@ -134,55 +146,66 @@ pub fn inject_docx_metadata(
             continue;
         }
 
-        let mut data = Vec::new();
-        (&mut file)
-            .take(crate::format::docx::MAX_DOCX_TOTAL_UNCOMPRESSED_BYTES + 1)
-            .read_to_end(&mut data)
-            .map_err(|e| ConversionError {
-                kind: ConversionErrorKind::CorruptInput,
-                message: format!("Error reading content of {}: {}", name, e),
-            })?;
-        if data.len() as u64 > crate::format::docx::MAX_DOCX_TOTAL_UNCOMPRESSED_BYTES {
-            return Err(ConversionError {
-                kind: ConversionErrorKind::ResourceLimit,
-                message: format!(
-                    "ZIP entry '{}' decompressed size exceeds resource limit",
-                    name
-                ),
-            });
-        }
+        if name == "[Content_Types].xml" || name == "_rels/.rels" {
+            let max_aux = crate::format::docx::MAX_DOCX_AUX_XML_BYTES;
+            let mut data = Vec::new();
+            (&mut file)
+                .take(max_aux + 1)
+                .read_to_end(&mut data)
+                .map_err(|e| ConversionError {
+                    kind: ConversionErrorKind::CorruptInput,
+                    message: format!("Error reading content of {}: {}", name, e),
+                })?;
+            if data.len() as u64 > max_aux {
+                return Err(ConversionError {
+                    kind: ConversionErrorKind::ResourceLimit,
+                    message: format!("XML entry '{}' exceeds auxiliary size limit", name),
+                });
+            }
 
-        if name == "[Content_Types].xml" {
-            let mut ct_str = String::from_utf8_lossy(&data).to_string();
-            if !ct_str.contains("docProps/core.xml") {
-                if let Some(end_pos) = ct_str.find("</Types>") {
-                    ct_str.insert_str(
-                        end_pos,
-                        "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\n",
-                    );
-                    data = ct_str.into_bytes();
+            if name == "[Content_Types].xml" {
+                let mut ct_str = String::from_utf8_lossy(&data).to_string();
+                if !ct_str.contains("docProps/core.xml") {
+                    if let Some(end_pos) = ct_str.find("</Types>") {
+                        ct_str.insert_str(
+                            end_pos,
+                            "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\n",
+                        );
+                        data = ct_str.into_bytes();
+                    }
+                }
+            } else {
+                let mut rel_str = String::from_utf8_lossy(&data).to_string();
+                if !rel_str.contains("docProps/core.xml") {
+                    if let Some(end_pos) = rel_str.find("</Relationships>") {
+                        rel_str.insert_str(
+                            end_pos,
+                            "<Relationship Id=\"rIdCoreMeta\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\n",
+                        );
+                        data = rel_str.into_bytes();
+                    }
                 }
             }
-        } else if name == "_rels/.rels" {
-            let mut rel_str = String::from_utf8_lossy(&data).to_string();
-            if !rel_str.contains("docProps/core.xml") {
-                if let Some(end_pos) = rel_str.find("</Relationships>") {
-                    rel_str.insert_str(
-                        end_pos,
-                        "<Relationship Id=\"rIdCoreMeta\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\n",
-                    );
-                    data = rel_str.into_bytes();
-                }
-            }
+
+            zip_writer
+                .start_file(&name, opt)
+                .map_err(|e| ConversionError {
+                    kind: ConversionErrorKind::Internal,
+                    message: format!("Error writing entry {}: {}", name, e),
+                })?;
+            zip_writer.write_all(&data).map_err(|e| ConversionError {
+                kind: ConversionErrorKind::Internal,
+                message: format!("Error writing data for {}: {}", name, e),
+            })?;
+            continue;
         }
 
         zip_writer
-            .start_file(&name, opt)
+            .raw_copy_file(file)
             .map_err(|e| ConversionError {
                 kind: ConversionErrorKind::Internal,
-                message: format!("Error writing entry {}: {}", name, e),
+                message: format!("Error raw-copying entry {}: {}", name, e),
             })?;
-        zip_writer.write_all(&data).unwrap();
     }
 
     if !replaced_core {
@@ -192,7 +215,12 @@ pub fn inject_docx_metadata(
                 kind: ConversionErrorKind::Internal,
                 message: format!("Error appending core.xml: {}", e),
             })?;
-        zip_writer.write_all(new_core_xml.as_bytes()).unwrap();
+        zip_writer
+            .write_all(new_core_xml.as_bytes())
+            .map_err(|e| ConversionError {
+                kind: ConversionErrorKind::Internal,
+                message: format!("Error writing core.xml: {}", e),
+            })?;
     }
 
     zip_writer.finish().map_err(|e| ConversionError {
@@ -233,5 +261,15 @@ mod tests {
         assert_eq!(extracted.author.as_deref(), Some("Docx Author"));
         assert_eq!(extracted.subject.as_deref(), Some("Docx Subject"));
         assert_eq!(extracted.keywords.as_deref(), Some("k1, k2"));
+    }
+
+    #[test]
+    fn test_extract_tag_value_unescapes_and_skips_self_closing() {
+        let xml = "<cp:coreProperties><dc:title/><dc:creator>Alice &amp; Bob</dc:creator></cp:coreProperties>";
+        assert_eq!(extract_tag_value(xml, "dc:title"), None);
+        assert_eq!(
+            extract_tag_value(xml, "dc:creator").as_deref(),
+            Some("Alice & Bob")
+        );
     }
 }

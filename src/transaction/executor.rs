@@ -92,35 +92,44 @@ impl std::error::Error for TaskError {}
 pub struct TaskExecutor;
 
 impl TaskExecutor {
-    /// Execute a file-to-file conversion task with atomic commit and strict checking.
-    pub fn execute_file_to_file(config: &TaskFileConfig<'_>) -> Result<TaskResult, TaskError> {
-        let t_start = Instant::now();
-
-        // 1. Guard against OOM before reading file
-        if let Ok(meta) = config.input_path.metadata() {
+    /// Read an input file into memory with a strict `MAX_INPUT_BYTES` upper bound.
+    pub fn read_bounded_file(path: &Path) -> Result<Vec<u8>, TaskError> {
+        if let Ok(meta) = path.metadata() {
             let len = meta.len() as usize;
             if len > MAX_INPUT_BYTES {
                 return Err(TaskError::SizeLimitExceeded(len));
             }
         }
-
-        // 2. Read input file with a hard cap so a file growing between the
-        //    metadata check and the read cannot exhaust memory.
         let mut bytes = Vec::new();
-        let file = fs::File::open(config.input_path).map_err(TaskError::IoRead)?;
+        let file = fs::File::open(path).map_err(TaskError::IoRead)?;
         let mut handle = file.take(MAX_INPUT_BYTES as u64 + 1);
         handle.read_to_end(&mut bytes).map_err(TaskError::IoRead)?;
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(TaskError::SizeLimitExceeded(bytes.len()));
         }
+        Ok(bytes)
+    }
 
-        // 3. Execute conversion with timing
+    /// Execute a file-to-file conversion task with atomic commit and strict checking.
+    pub fn execute_file_to_file(config: &TaskFileConfig<'_>) -> Result<TaskResult, TaskError> {
+        let bytes = Self::read_bounded_file(config.input_path)?;
+        Self::execute_bytes_to_file(&bytes, config)
+    }
+
+    /// Execute a conversion task from pre-read input bytes with atomic commit and strict checking.
+    pub fn execute_bytes_to_file(
+        bytes: &[u8],
+        config: &TaskFileConfig<'_>,
+    ) -> Result<TaskResult, TaskError> {
+        let t_start = Instant::now();
+
+        // 1. Execute conversion with timing
         let t_conv = Instant::now();
-        let mut output = convert(&bytes, config.options).map_err(TaskError::Conversion)?;
+        let mut output = convert(bytes, config.options).map_err(TaskError::Conversion)?;
         let conversion_ms = t_conv.elapsed().as_secs_f64() * 1000.0;
 
-        // 4. Extension mismatch diagnostic
-        Self::append_extension_diagnostics(config.input_path, &bytes, &mut output.warnings);
+        // 2. Extension mismatch diagnostic
+        Self::append_extension_diagnostics(config.input_path, bytes, &mut output.warnings);
 
         // 5. Strict quality gating
         if config.strict && !output.warnings.is_empty() {

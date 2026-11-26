@@ -101,13 +101,17 @@ pub fn run_batch_conversion(config: &BatchConfig) -> Result<BatchSummary, i32> {
                 config.input_dir
             );
         }
-        return Ok(BatchSummary {
+        let summary = BatchSummary {
             total: 0,
             succeeded: 0,
             failed: 0,
             skipped: 0,
             elapsed_ms: t_start.elapsed().as_secs_f64() * 1000.0,
-        });
+        };
+        if let Some(ref rep_path) = config.report_json {
+            commit_batch_report(rep_path, config, &summary, Vec::new())?;
+        }
+        return Ok(summary);
     }
 
     let plan = create_and_validate_batch_plan(

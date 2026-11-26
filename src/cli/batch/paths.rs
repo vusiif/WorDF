@@ -2,6 +2,7 @@
 //! License: GPL-3.0-or-later
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -63,23 +64,23 @@ pub fn discover_word_documents_ext(
                 continue;
             }
 
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            let file_name = match path.file_name() {
                 Some(n) => n,
                 None => continue,
             };
 
-            // Skip Office lock/temporary files like '~$example.docx'
-            if file_name.starts_with("~$") {
+            // Skip Office lock/temporary files like '~$example.docx' while preserving non-UTF-8 filenames
+            if file_name.to_string_lossy().starts_with("~$") {
                 continue;
             }
 
-            let ext = path
+            let is_word_ext = path
                 .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
+                .and_then(OsStr::to_str)
+                .map(|e| e.eq_ignore_ascii_case("doc") || e.eq_ignore_ascii_case("docx"))
+                .unwrap_or(false);
 
-            if ext == "doc" || ext == "docx" {
+            if is_word_ext {
                 files.push(path);
             }
         }

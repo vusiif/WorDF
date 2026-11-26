@@ -203,3 +203,43 @@ fn test_batch_resume_skips_up_to_date_output() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_empty_batch_still_commits_report_json() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "wordf_empty_batch_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let input_dir = temp_dir.join("in");
+    let output_dir = temp_dir.join("out");
+    let report_path = temp_dir.join("empty_report.json");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let config = BatchConfig {
+        input_dir,
+        output_dir,
+        report_json: Some(report_path.clone()),
+        options: ConversionOptions::default(),
+        overwrite: false,
+        recursive: false,
+        strict: false,
+        resume: false,
+        jobs: Some(1),
+        verbose: false,
+        quiet: true,
+    };
+    let summary = run_batch_conversion(&config).expect("Empty batch must succeed");
+    assert_eq!(summary.total, 0);
+    assert!(
+        report_path.exists(),
+        "JSON report must be written even when 0 files found"
+    );
+    let report = fs::read_to_string(&report_path).unwrap();
+    assert!(report.contains("\"total\": 0"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

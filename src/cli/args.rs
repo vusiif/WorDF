@@ -11,7 +11,7 @@ use wordf::{ConversionErrorKind, InputFormat};
 pub use crate::cli::help::{print_help, print_version, TOOL_NAME, TOOL_VERSION};
 use crate::cli::password::PasswordOptions;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CliArgs {
     pub input_path: Option<PathBuf>,
     pub output_pdf: Option<PathBuf>,
@@ -30,6 +30,29 @@ pub struct CliArgs {
     pub metadata: wordf::DocumentMetadata,
     pub quiet: bool,
     pub verbose: bool,
+}
+
+impl std::fmt::Debug for CliArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliArgs")
+            .field("input_path", &self.input_path)
+            .field("output_pdf", &self.output_pdf)
+            .field("format", &self.format)
+            .field("overwrite", &self.overwrite)
+            .field("report_json", &self.report_json)
+            .field("font_paths", &self.font_paths)
+            .field("jobs", &self.jobs)
+            .field("recursive", &self.recursive)
+            .field("strict", &self.strict)
+            .field("analyze", &self.analyze)
+            .field("resume", &self.resume)
+            .field("pages", &self.pages)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("metadata", &self.metadata)
+            .field("quiet", &self.quiet)
+            .field("verbose", &self.verbose)
+            .finish()
+    }
 }
 
 pub fn parse_cli_args() -> Result<CliArgs, i32> {

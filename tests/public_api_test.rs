@@ -486,3 +486,14 @@ fn test_consumer_metadata_injection_and_pdf_info() {
         Some("Finance Department")
     );
 }
+
+#[test]
+fn test_conversion_options_debug_redacts_password() {
+    let opts = ConversionOptions {
+        password: Some("SuperSecret123!".to_string()),
+        ..Default::default()
+    };
+    let debug_str = format!("{:?}", opts);
+    assert!(!debug_str.contains("SuperSecret123!"));
+    assert!(debug_str.contains("<redacted>"));
+}

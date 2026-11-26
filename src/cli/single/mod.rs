@@ -35,12 +35,16 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
     let input_bytes = read_input_bytes(&config.validated.input_canonical);
 
     // Validate encryption and password fail-fast before attempting resume or conversion
-    if let Err(e) =
-        wordf::crypto::decrypt_office_document(&input_bytes, config.options.password.as_deref())
-    {
-        eprintln!("Error during conversion: {}", e);
-        process::exit(map_conversion_error_to_exit_code(&e.kind));
-    }
+    let decrypted_holder = match wordf::crypto::decrypt_office_document(
+        &input_bytes,
+        config.options.password.as_deref(),
+    ) {
+        Ok(holder) => holder,
+        Err(e) => {
+            eprintln!("Error during conversion: {}", e);
+            process::exit(map_conversion_error_to_exit_code(&e.kind));
+        }
+    };
 
     let is_streaming = config.validated.input_canonical.as_os_str() == "-"
         || config.validated.output_pdf_path.as_os_str() == "-";
@@ -95,8 +99,9 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
         );
     }
 
+    let effective_bytes = decrypted_holder.as_deref().unwrap_or(&input_bytes);
     let t_conv = Instant::now();
-    let mut output = match convert(&input_bytes, config.options) {
+    let mut output = match convert(effective_bytes, config.options) {
         Ok(out) => out,
         Err(e) => {
             eprintln!("Error during conversion: {}", e);
@@ -116,7 +121,7 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
 
     TaskExecutor::append_extension_diagnostics(
         &config.validated.input_canonical,
-        &input_bytes,
+        effective_bytes,
         &mut output.warnings,
     );
 
@@ -223,7 +228,10 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
         config.strict,
     );
     let _ = crate::cli::resume::write_resume_fingerprint(&config.validated.output_pdf_path, &fp);
+    exit_committed(config);
+}
 
+fn exit_committed(config: &SingleConfig<'_>) -> ! {
     if config.verbose {
         eprintln!(
             "[verbose] Committed PDF to {:?} (total elapsed: {:.2}ms)",
@@ -231,31 +239,32 @@ pub fn run_single_conversion(config: &SingleConfig<'_>) -> ! {
             config.t_start.elapsed().as_secs_f64() * 1000.0
         );
     }
-
     process::exit(0);
 }
 
 fn read_input_bytes(path: &Path) -> Vec<u8> {
-    let reader: Box<dyn Read> = if path.as_os_str() == "-" {
-        Box::new(std::io::stdin())
-    } else {
-        Box::new(fs::File::open(path).unwrap_or_else(|e| {
-            eprintln!("Error reading input file {:?}: {}", path, e);
-            process::exit(4);
-        }))
-    };
+    if path.as_os_str() != "-" {
+        return TaskExecutor::read_bounded_file(path).unwrap_or_else(|err| {
+            eprintln!("Error reading input file {:?}: {}", path, err);
+            let code = match err {
+                wordf::transaction::TaskError::SizeLimitExceeded(_) => 6,
+                _ => 4,
+            };
+            process::exit(code);
+        });
+    }
     let mut buf = Vec::new();
-    if reader
+    if std::io::stdin()
         .take(MAX_INPUT_BYTES as u64 + 1)
         .read_to_end(&mut buf)
         .is_err()
     {
-        eprintln!("Error reading input file {:?}", path);
+        eprintln!("Error reading input from stdin");
         process::exit(4);
     }
     if buf.len() > MAX_INPUT_BYTES {
         eprintln!(
-            "Error: Input size exceeds maximum limit of {} bytes (128 MiB)",
+            "Error: Input size exceeds {} bytes (128 MiB)",
             MAX_INPUT_BYTES
         );
         process::exit(6);
@@ -277,13 +286,5 @@ fn deliver_stdout(config: &SingleConfig<'_>, pdf_bytes: &[u8], meta: &ReportMeta
             process::exit(9);
         }
     }
-    if config.verbose {
-        eprintln!(
-            "[verbose] Committed PDF to {:?} (total elapsed: {:.2}ms)",
-            config.validated.output_pdf_path,
-            config.t_start.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-
-    process::exit(0);
+    exit_committed(config);
 }

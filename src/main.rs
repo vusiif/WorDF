@@ -64,20 +64,7 @@ fn main() {
         }
     }
 
-    let mut fallback_chain = discovered_fonts.fallback_chain.clone();
-    if fallback_chain.is_empty()
-        && args.font_paths.is_empty()
-        && wordf::font::has_embedded_cjk_font()
-    {
-        let b = wordf::font::embedded_cjk_font_bytes();
-        if let Some(cmap) = wordf::font::get_or_init_embedded_font_cmap(b).cloned() {
-            fallback_chain.push_with_cmap(
-                wordf::EMBEDDED_CJK_FONT_NAME.to_string(),
-                b.to_vec(),
-                cmap,
-            );
-        }
-    }
+    let fallback_chain = discovered_fonts.fallback_chain.clone();
 
     let options = ConversionOptions {
         format: args.format,

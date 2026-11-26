@@ -1,8 +1,8 @@
 //! Unified font resolution and cascade fallback engine.
 //! License: GPL-3.0-or-later
 
+use std::borrow::Cow;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use crate::font::chain::FontFallbackChain;
 use crate::font::cmap::FontCmap;
@@ -13,7 +13,7 @@ pub struct FontResolver {
     pub fallback_chain: FontFallbackChain,
     pub available_fonts: Vec<String>,
     pub primary_fallback_name: Option<String>,
-    pub primary_fallback_bytes: Option<Arc<Vec<u8>>>,
+    pub primary_fallback_bytes: Option<Cow<'static, [u8]>>,
     pub primary_cmap: Option<FontCmap>,
 }
 
@@ -24,10 +24,23 @@ impl FontResolver {
         primary_fallback_name: Option<String>,
         primary_fallback_bytes: Option<Vec<u8>>,
     ) -> Self {
-        let primary_fallback_bytes = primary_fallback_bytes.map(Arc::new);
+        Self::from_cow(
+            fallback_chain,
+            available_fonts,
+            primary_fallback_name,
+            primary_fallback_bytes.map(Cow::Owned),
+        )
+    }
+
+    pub fn from_cow(
+        fallback_chain: FontFallbackChain,
+        available_fonts: Vec<String>,
+        primary_fallback_name: Option<String>,
+        primary_fallback_bytes: Option<Cow<'static, [u8]>>,
+    ) -> Self {
         let primary_cmap = if let Some(ref bytes) = primary_fallback_bytes {
             let embedded = crate::font::embedded_cjk_font_bytes();
-            if !embedded.is_empty() && bytes.as_slice() == embedded {
+            if !embedded.is_empty() && bytes.as_ref() == embedded {
                 crate::font::get_or_init_embedded_font_cmap(bytes).cloned()
             } else {
                 FontCmap::from_bytes(bytes)

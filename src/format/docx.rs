@@ -115,7 +115,7 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
                     ),
                 });
             }
-            // Buffer at most 64 KiB to determine dimensions, preventing large image memory spikes
+            // Buffer at most 64 KiB first; if header needs more, cap strictly at MAX_DOCX_MEDIA_BYTES
             let mut img_header = Vec::new();
             if file
                 .by_ref()
@@ -123,10 +123,28 @@ pub fn validate_docx_package(bytes: &[u8]) -> Result<(), ConversionError> {
                 .read_to_end(&mut img_header)
                 .is_ok()
             {
-                let size_opt = imagesize::blob_size(&img_header).or_else(|_| {
-                    let _ = file.read_to_end(&mut img_header);
-                    imagesize::blob_size(&img_header)
-                });
+                let size_opt = match imagesize::blob_size(&img_header) {
+                    Ok(s) => Ok(s),
+                    Err(_) => {
+                        let remaining =
+                            MAX_DOCX_MEDIA_BYTES.saturating_sub(img_header.len() as u64);
+                        if (&mut file)
+                            .take(remaining + 1)
+                            .read_to_end(&mut img_header)
+                            .is_ok()
+                            && img_header.len() as u64 > MAX_DOCX_MEDIA_BYTES
+                        {
+                            return Err(ConversionError {
+                                kind: ConversionErrorKind::ResourceLimit,
+                                message: format!(
+                                    "Media item '{}' decompressed size exceeds limit of {} bytes",
+                                    name, MAX_DOCX_MEDIA_BYTES
+                                ),
+                            });
+                        }
+                        imagesize::blob_size(&img_header)
+                    }
+                };
 
                 if let Ok(size) = size_opt {
                     if size.width > MAX_IMAGE_DIMENSION || size.height > MAX_IMAGE_DIMENSION {
